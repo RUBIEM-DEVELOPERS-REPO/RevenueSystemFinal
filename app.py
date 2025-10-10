@@ -10,712 +10,716 @@ from sklearn.ensemble import IsolationForest
 from scipy import stats
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
+import psycopg2
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # Set page config at the very top
 st.set_page_config(
     page_title="Revenue Assurance Dashboard",
-   
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# --- TWO NEON DATABASE CONNECTIONS ---
+# Database 1: Main database (transactions, charges, transaction_types)
+NEON_DB_MAIN = {
+    "host": "ep-frosty-dawn-ad0cnbjn-pooler.c-2.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "user": "neondb_owner",
+    "password": "npg_XCO6HPNfw7El",
+    "port": 5432
+}
+
+# Database 2: Price recommendations database
+NEON_DB_PRICE = {
+    "host": "ep-wispy-tooth-a4uiq32x.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "user": "neondb_owner",
+    "password": "npg_7AlUWE8wkigH",
+    "port": 5432
+}
+
+def get_neon_connection(db_config):
+    """Create and return a connection to specified Neon database"""
+    try:
+        conn = psycopg2.connect(**db_config)
+        return conn
+    except Exception as e:
+        st.error(f"❌ Database connection failed: {e}")
+        return None
+
+def load_charges_and_recommendations():
+    """Load charges and price recommendations and perform calculations"""
+    try:
+        # Load charges from main database
+        conn_main = get_neon_connection(NEON_DB_MAIN)
+        if not conn_main:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        
+        cur1 = conn_main.cursor()
+        cur1.execute("""
+            SELECT transaction_type_id, charge_type, charge_range_min, charge_range_max, charge_amount, charge_percentage
+            FROM charges
+        """)
+        charges_data = cur1.fetchall()
+        cur1.close()
+        conn_main.close()
+
+        # Load price recommendations from price database
+        conn_price = get_neon_connection(NEON_DB_PRICE)
+        if not conn_price:
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        
+        cur2 = conn_price.cursor()
+        cur2.execute("""
+            SELECT transaction_type_id, recommended_min_fee, recommended_max_fee, recommended_flat_fee, recommended_percentage_fee
+            FROM price_recommendations
+        """)
+        recommended_prices_data = cur2.fetchall()
+        cur2.close()
+        conn_price.close()
+
+        # Create DataFrames
+        charges_df = pd.DataFrame(charges_data, columns=[
+            "transaction_type_id", "charge_type", "charge_range_min", "charge_range_max", "charge_amount", "charge_percentage"
+        ])
+        
+        recommended_prices_df = pd.DataFrame(recommended_prices_data, columns=[
+            "transaction_type_id", "recommended_min_fee", "recommended_max_fee", "recommended_flat_fee", "recommended_percentage_fee"
+        ])
+
+        # Merge DataFrames based on transaction type
+        merged_df = pd.merge(charges_df, recommended_prices_df, on="transaction_type_id", how='inner')
+
+        # Remove duplicate records
+        merged_df = merged_df.drop_duplicates()
+
+        # Convert to numeric types to ensure proper calculations
+        numeric_columns = [
+            'charge_range_min', 'charge_range_max', 'charge_amount', 'charge_percentage',
+            'recommended_min_fee', 'recommended_max_fee', 'recommended_flat_fee', 'recommended_percentage_fee'
+        ]
+        
+        for col in numeric_columns:
+            merged_df[col] = pd.to_numeric(merged_df[col], errors='coerce').fillna(0)
+
+        # Calculate differences with proper validation
+        merged_df['min_fee_diff'] = merged_df['charge_range_min'] - merged_df['recommended_min_fee']
+        merged_df['max_fee_diff'] = merged_df['charge_range_max'] - merged_df['recommended_max_fee']
+        merged_df['charge_amount_diff'] = merged_df['charge_amount'] - merged_df['recommended_flat_fee']
+        merged_df['percentage_diff'] = merged_df['charge_percentage'] - merged_df['recommended_percentage_fee']
+
+        # Calculate percentage differences
+        merged_df['min_fee_percentage_diff'] = np.where(
+            merged_df['recommended_min_fee'] != 0,
+            (merged_df['min_fee_diff'] / merged_df['recommended_min_fee']) * 100,
+            0
+        )
+        
+        merged_df['max_fee_percentage_diff'] = np.where(
+            merged_df['recommended_max_fee'] != 0,
+            (merged_df['max_fee_diff'] / merged_df['recommended_max_fee']) * 100,
+            0
+        )
+
+        # Create a comprehensive differences table
+        differences_table = merged_df[[
+            "transaction_type_id", "charge_type",
+            "charge_range_min", "recommended_min_fee", "min_fee_diff", "min_fee_percentage_diff",
+            "charge_range_max", "recommended_max_fee", "max_fee_diff", "max_fee_percentage_diff",
+            "charge_amount", "recommended_flat_fee", "charge_amount_diff",
+            "charge_percentage", "recommended_percentage_fee", "percentage_diff"
+        ]]
+
+        return charges_df, recommended_prices_df, differences_table
+
+    except Exception as e:
+        st.error(f"❌ Error loading charges and recommendations: {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+def detect_anomalies_iforest(differences_table):
+    """Detect anomalies using Isolation Forest"""
+    try:
+        # Prepare features for anomaly detection
+        features = differences_table[['charge_amount_diff', 'percentage_diff']].copy()
+        
+        # Handle infinite values and NaN
+        features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
+        
+        # Standardize features
+        scaler = StandardScaler()
+        features_scaled = scaler.fit_transform(features)
+        
+        # Apply Isolation Forest
+        iforest = IsolationForest(contamination=0.1, random_state=42)
+        anomaly_predictions = iforest.fit_predict(features_scaled)
+        
+        differences_table = differences_table.copy()
+        differences_table['anomaly'] = anomaly_predictions
+        anomalies = differences_table[differences_table['anomaly'] == -1]
+        
+        return differences_table, anomalies
+
+    except Exception as e:
+        st.error(f"❌ Isolation Forest failed: {e}")
+        return differences_table, pd.DataFrame()
+
+def detect_anomalies_zscore(differences_table):
+    """Detect anomalies using Z-Score method"""
+    try:
+        # Prepare features
+        features = differences_table[['charge_amount_diff', 'percentage_diff']].copy()
+        
+        # Convert to numeric and handle errors
+        features['charge_amount_diff'] = pd.to_numeric(features['charge_amount_diff'], errors='coerce').fillna(0)
+        features['percentage_diff'] = pd.to_numeric(features['percentage_diff'], errors='coerce').fillna(0)
+
+        # Calculate Z-scores with proper NaN handling
+        z_scores = np.abs(stats.zscore(features, nan_policy='omit'))
+        z_scores = np.nan_to_num(z_scores, nan=0)
+        
+        # Detect anomalies (Z-score > 3)
+        anomaly_mask = (z_scores > 3).any(axis=1)
+        anomalies = differences_table[anomaly_mask]
+        
+        differences_table = differences_table.copy()
+        differences_table['anomaly'] = anomaly_mask.astype(str)
+        
+        return differences_table, anomalies
+
+    except Exception as e:
+        st.error(f"❌ Z-Score detection failed: {e}")
+        return differences_table, pd.DataFrame()
+
+def detect_anomalies_autoencoder(differences_table):
+    """Detect anomalies using Autoencoder (simplified PCA approach)"""
+    try:
+        # Prepare features
+        features = differences_table[['charge_amount_diff', 'percentage_diff']].copy()
+        
+        # Handle infinite values and NaN
+        features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
+        
+        # Standardize features
+        scaler = StandardScaler()
+        features_scaled = scaler.fit_transform(features)
+        
+        # Use PCA for dimensionality reduction (simplified autoencoder)
+        pca = PCA(n_components=1)
+        transformed = pca.fit_transform(features_scaled)
+        reconstructed = pca.inverse_transform(transformed)
+        
+        # Calculate reconstruction error
+        reconstruction_error = np.mean((features_scaled - reconstructed) ** 2, axis=1)
+        
+        # Detect anomalies based on reconstruction error
+        threshold = np.percentile(reconstruction_error, 95)  # Top 5% as anomalies
+        anomaly_mask = reconstruction_error > threshold
+        
+        anomalies = differences_table[anomaly_mask]
+        differences_table = differences_table.copy()
+        differences_table['anomaly'] = anomaly_mask.astype(int)
+        
+        return differences_table, anomalies
+
+    except Exception as e:
+        st.error(f"❌ Autoencoder detection failed: {e}")
+        return differences_table, pd.DataFrame()
+
+def detect_rule_based_anomalies(differences_table):
+    """Detect anomalies based on business rules"""
+    try:
+        anomalies = []
+        
+        for idx, row in differences_table.iterrows():
+            reasons = []
+            severity = "low"
+            
+            # Rule 1: Significant min fee difference (> 20%)
+            if abs(row['min_fee_percentage_diff']) > 20:
+                reasons.append(f"Min fee difference: {row['min_fee_percentage_diff']:.1f}%")
+                severity = "high" if abs(row['min_fee_percentage_diff']) > 50 else "medium"
+            
+            # Rule 2: Significant max fee difference (> 20%)
+            if abs(row['max_fee_percentage_diff']) > 20:
+                reasons.append(f"Max fee difference: {row['max_fee_percentage_diff']:.1f}%")
+                severity = "high" if abs(row['max_fee_percentage_diff']) > 50 else "medium"
+            
+            # Rule 3: Large absolute charge amount difference
+            if abs(row['charge_amount_diff']) > 100:
+                reasons.append(f"Charge amount difference: ${row['charge_amount_diff']:.2f}")
+                severity = "high" if abs(row['charge_amount_diff']) > 500 else "medium"
+            
+            # Rule 4: Large percentage difference
+            if abs(row['percentage_diff']) > 10:
+                reasons.append(f"Percentage difference: {row['percentage_diff']:.1f}%")
+                severity = "high" if abs(row['percentage_diff']) > 25 else "medium"
+            
+            if reasons:
+                anomalies.append({
+                    'transaction_type_id': row['transaction_type_id'],
+                    'charge_type': row['charge_type'],
+                    'reasons': reasons,
+                    'severity': severity,
+                    'min_fee_percentage_diff': row['min_fee_percentage_diff'],
+                    'max_fee_percentage_diff': row['max_fee_percentage_diff'],
+                    'charge_amount_diff': row['charge_amount_diff'],
+                    'percentage_diff': row['percentage_diff']
+                })
+        
+        return pd.DataFrame(anomalies) if anomalies else pd.DataFrame()
+        
+    except Exception as e:
+        st.error(f"❌ Rule-based detection failed: {e}")
+        return pd.DataFrame()
 
 def main():
+    # Simple CSS for spaced tabs only
     st.markdown("""
     <style>
-    .main .block-container {
-        padding-top: 2rem;
-        padding-left: 4rem;
-        padding-right: 4rem;
-        padding-bottom: 4rem;
-        max-width: 100%;
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 24px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 12px 24px;
+        margin: 0 8px;
     }
     
-    .full-width-header {
+    /* Sidebar styling */
+    .sidebar .sidebar-content {
+        background-color: #f8f9fa;
+    }
+    
+    .quick-action-btn {
         width: 100%;
+        margin: 5px 0;
+        padding: 10px;
+        border-radius: 8px;
+        border: 1px solid #ddd;
         background: white;
-        padding: 4rem 0;
-        color: #2c3e50;
-        text-align: center;
-        margin-bottom: 4rem;
-        border-bottom: 1px solid #e1e4e8;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
+        cursor: pointer;
+        transition: all 0.3s ease;
     }
     
-    .header-content {
-        max-width: 1600px;
-        width: 100%;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        padding: 0 3rem;
-    }
-    
-    .feature-tags {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 1.5rem;
-        margin-top: 2.5rem;
-    }
-    
-    .dashboard-content {
-        padding: 0 3rem;
-        max-width: 1600px;
-        margin: 0 auto;
-    }
-    
-    .feature-card {
-        background: white;
-        border-radius: 12px;
-        padding: 2.5rem;
-        border: 1px solid #e1e4e8;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        height: 100%;
-        transition: transform 0.2s;
-        margin-bottom: 2rem;
-    }
-    
-    .metric-card {
-        background: white;
-        border-radius: 12px;
-        padding: 2.5rem;
-        border: 1px solid #e1e4e8;
-        text-align: center;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-        margin: 1.5rem 0;
-        transition: transform 0.2s;
-    }
-    
-    .chart-container {
-        background: white;
-        border-radius: 12px;
-        padding: 2.5rem;
-        border: 1px solid #e1e4e8;
-        margin: 2.5rem 0;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-    }
-    
-    .algorithm-card {
-        background: #fff;
-        padding: 1rem;
-        border-radius: 10px;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.08);
-        min-height: 160px;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-        margin-bottom: 0.5rem;
-    }
-    .algorithm-card h4 {
-        margin: 0 0 0.5rem 0;
-        font-size: 1.1rem;
-    }
-    .algorithm-card p {
-        margin: 0;
-        font-size: 0.85rem;
-        color: #555;
-    }
-    
-    .download-section {
-        background: #f8f9fa;
-        border-radius: 12px;
-        padding: 2rem;
-        border: 2px dashed #dee2e6;
-        margin: 2rem 0;
+    .quick-action-btn:hover {
+        background: #e3f2fd;
+        border-color: #2196f3;
+        transform: translateY(-1px);
     }
     </style>
     """, unsafe_allow_html=True)
 
-    # DASHBOARD HEADER
-    st.markdown("""
-    <div class="full-width-header">
-        <div class="header-content">
-            <h1 style="margin:0; font-size:3.5rem; font-weight:800; color: #2c3e50; text-align: center;">💰 Revenue Assurance Dashboard</h1>
-            <p style="margin:0; opacity:0.8; font-size:1.6rem; margin-top:1.5rem; color: #7f8c8d; text-align: center;">
-            AI-Powered Anomaly Detection & Revenue Optimization Platform
-            </p>
-            <div class="feature-tags">
-                <span style="background: #f8f9fa; padding:1rem 2rem; border-radius:30px; font-size:1.1rem; color: #2c3e50; border: 1px solid #e1e4e8; white-space: nowrap;">
-                🔍 Real-time Monitoring
-                </span>
-                <span style="background: #f8f9fa; padding:1rem 2rem; border-radius:30px; font-size:1.1rem; color: #2c3e50; border: 1px solid #e1e4e8; white-space: nowrap;">
-                🤖 Multi-Algorithm AI
-                </span>
-                <span style="background: #f8f9fa; padding:1rem 2rem; border-radius:30px; font-size:1.1rem; color: #2c3e50; border: 1px solid #e1e4e8; white-space: nowrap;">
-                📊 Advanced Analytics
-                </span>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Content container starts here
-    st.markdown('<div class="dashboard-content">', unsafe_allow_html=True)
-
-    # Define functions
-    def generate_sample_data():
-        """Generate sample revenue data for demonstration"""
-        dates = pd.date_range(start='2023-01-01', end='2023-12-31', freq='D')
-        n_days = len(dates)
+    # ===== SIDEBAR =====
+    with st.sidebar:
+        st.title(" Quick Access")
+        st.markdown("---")
         
-        random.seed(42)
+        # Database Status
+        st.subheader("Database Status")
+        col1, col2 = st.columns(2)
+        with col1:
+            main_conn = get_neon_connection(NEON_DB_MAIN)
+            if main_conn:
+                st.success("Main DB ✅")
+                main_conn.close()
+            else:
+                st.error("Main DB ❌")
+        with col2:
+            price_conn = get_neon_connection(NEON_DB_PRICE)
+            if price_conn:
+                st.success("Price DB ✅")
+                price_conn.close()
+            else:
+                st.error("Price DB ❌")
         
-        revenue = []
-        current = 100000
+        st.markdown("---")
         
-        for i in range(n_days):
-            growth = random.uniform(80, 120)
-            current += growth
-            seasonal = 3000 * math.sin(2 * math.pi * i / 365)
-            current += seasonal
-            revenue.append(current)
+        # Quick Actions
+        st.subheader("Quick Actions")
         
-        anomaly = [False] * n_days
-        anomaly_indices = random.sample(range(n_days), 12)
-        
-        for idx in anomaly_indices:
-            revenue[idx] = revenue[idx] * random.uniform(0.3, 0.6)
-            anomaly[idx] = True
-        
-        return pd.DataFrame({
-            'date': dates,
-            'revenue': revenue,
-            'anomaly': anomaly
-        })
-
-    def generate_analysis_data():
-        """Generate sample transaction data for anomaly detection"""
-        np.random.seed(42)
-        n_samples = 1000
-        
-        data = {
-            'transaction_id': range(1, n_samples + 1),
-            'charge_amount': np.random.normal(100, 30, n_samples),
-            'recommended_min_fee': np.random.normal(80, 20, n_samples),
-            'recommended_max_fee': np.random.normal(120, 25, n_samples),
-            'recommended_percentage_fee': np.random.normal(5, 2, n_samples),
-            'recommended_flat_fee': np.random.normal(10, 5, n_samples),
-            'transaction_type_id': np.random.choice(['TYPE_A', 'TYPE_B', 'TYPE_C', 'TYPE_D'], n_samples)
-        }
-        
-        df = pd.DataFrame(data)
-        
-        # Create some anomalies
-        anomaly_indices = np.random.choice(n_samples, 50, replace=False)
-        df.loc[anomaly_indices, 'charge_amount'] *= np.random.uniform(1.5, 3.0, 50)
-        
-        # Calculate differences
-        df['charge_amount_diff'] = df['charge_amount'] - df[['recommended_min_fee', 'recommended_max_fee']].mean(axis=1)
-        df['percentage_diff'] = (df['charge_amount_diff'] / df[['recommended_min_fee', 'recommended_max_fee']].mean(axis=1)) * 100
-        
-        return df
-
-    def detect_rule_based_anomalies(df):
-        """Detect anomalies based on business rules"""
-        anomalies = []
-        
-        for idx, row in df.iterrows():
-            reasons = []
-            severity = "low"
-            
-            # Rule 1: Charge outside recommended range
-            if (row['charge_amount'] < row['recommended_min_fee'] or 
-                row['charge_amount'] > row['recommended_max_fee']):
-                reasons.append(f"Charge ${row['charge_amount']:.2f} outside range [${row['recommended_min_fee']:.2f}, ${row['recommended_max_fee']:.2f}]")
-                severity = "high"
-            
-            # Rule 2: Percentage difference too high
-            if abs(row['percentage_diff']) > 50:  # More than 50% deviation
-                reasons.append(f"Percentage difference too high: {row['percentage_diff']:.1f}%")
-                severity = "medium"
-            
-            # Rule 3: Charge amount difference significant
-            if abs(row['charge_amount_diff']) > 100:  # More than $100 difference
-                reasons.append(f"Charge amount difference significant: ${row['charge_amount_diff']:.2f}")
-                severity = "medium"
-            
-            if reasons:
-                anomalies.append({
-                    'index': idx,
-                    'reasons': reasons,
-                    'severity': severity,
-                    'actual_charge': row['charge_amount'],
-                    'recommended_min': row['recommended_min_fee'],
-                    'recommended_max': row['recommended_max_fee']
-                })
-        
-        return pd.DataFrame(anomalies) if anomalies else pd.DataFrame()
-
-    # Initialize session state
-    if 'run_analysis' not in st.session_state:
-        st.session_state.run_analysis = False
-    if 'view_raw_data' not in st.session_state:
-        st.session_state.view_raw_data = False
-    if 'analysis_results' not in st.session_state:
-        st.session_state.analysis_results = None
-
-    # Load sample data
-    df = generate_sample_data()
-    merged_df = generate_analysis_data()
-
-    
-
-    # Features Section
-    st.markdown("## 🚀 Core Features")
-    features_col1, features_col2, features_col3 = st.columns(3)
-
-    with features_col1:
-        st.markdown("""
-        <div class="feature-card">
-            <div style='font-size: 2.5rem; margin-bottom: 1rem;'>🔍</div>
-            <h3 style='color: #2c3e50; margin-bottom: 1rem;'>Real-time Monitoring</h3>
-            <p style='color: #7f8c8d;'>Continuous tracking of revenue streams with instant alerts for discrepancies and potential revenue leaks.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with features_col2:
-        st.markdown("""
-        <div class="feature-card">
-            <div style='font-size: 2.5rem; margin-bottom: 1rem;'>🤖</div>
-            <h3 style='color: #2c3e50; margin-bottom: 1rem;'>Multi-Algorithm AI</h3>
-            <p style='color: #7f8c8d;'>Advanced machine learning models working in tandem to detect complex patterns and subtle anomalies.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with features_col3:
-        st.markdown("""
-        <div class="feature-card">
-            <div style='font-size: 2.5rem; margin-bottom: 1rem;'>📊</div>
-            <h3 style='color: #2c3e50; margin-bottom: 1rem;'>Advanced Analytics</h3>
-            <p style='color: #7f8c8d;'>Deep insights into revenue performance with predictive analytics and optimization recommendations.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Revenue Trend Chart
-    st.markdown("## 📊 Revenue Analytics")
-    st.markdown('<div class="chart-container">', unsafe_allow_html=True)
-    
-    fig_revenue = go.Figure()
-    normal_data = df[~df['anomaly']]
-    fig_revenue.add_trace(go.Scatter(
-        x=normal_data['date'],
-        y=normal_data['revenue'],
-        mode='lines',
-        name='Normal Revenue',
-        line=dict(color='#667eea', width=3)
-    ))
-
-    anomaly_data = df[df['anomaly']]
-    fig_revenue.add_trace(go.Scatter(
-        x=anomaly_data['date'],
-        y=anomaly_data['revenue'],
-        mode='markers',
-        name='Anomalies Detected',
-        marker=dict(color='#ff6b6b', size=10, symbol='x-thin', line=dict(width=2))
-    ))
-
-    fig_revenue.update_layout(
-        height=400,
-        showlegend=True,
-        xaxis_title="Date",
-        yaxis_title="Revenue ($)",
-        template="plotly_white",
-        hovermode='x unified'
-    )
-
-    st.plotly_chart(fig_revenue, use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # ANOMALY DETECTION SECTION
-    st.markdown("## 🎯 Advanced Anomaly Detection")
-    
-    # Algorithm Selection
-    st.markdown("#### Select Detection Algorithms")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown("""
-        <div class="algorithm-card">
-            <h4>🌲 Isolation Forest</h4>
-            <p><small>Unsupervised anomaly detection using tree-based ensemble</small></p>
-        </div>
-        """, unsafe_allow_html=True)
-        use_isolation_forest = st.checkbox("Enable Isolation Forest", value=True, key="iforest")
-        
-    with col2:
-        st.markdown("""
-        <div class="algorithm-card">
-            <h4>📊 Z-Score Detection</h4>
-            <p><small>Statistical outlier detection based on standard deviations</small></p>
-        </div>
-        """, unsafe_allow_html=True)
-        use_zscore = st.checkbox("Enable Z-Score", value=True, key="zscore")
-        
-    with col3:
-        st.markdown("""
-        <div class="algorithm-card">
-            <h4>🧠 Autoencoder</h4>
-            <p><small>Deep learning anomaly detection using neural networks</small></p>
-        </div>
-        """, unsafe_allow_html=True)
-        use_autoencoder = st.checkbox("Enable Autoencoder", value=False, key="autoencoder")
-
-    with col4:
-        st.markdown("""
-        <div class="algorithm-card">
-            <h4>📏 Rule-Based</h4>
-            <p><small>Business rule violations in pricing and fees</small></p>
-        </div>
-        """, unsafe_allow_html=True)
-        use_rule_based = st.checkbox("Enable Rule-Based", value=True, key="rule_based")
-
-    # Run analysis when triggered
-    if st.session_state.run_analysis or st.button("🚀 Run Comprehensive Analysis", type="primary", use_container_width=True):
-        with st.spinner("🤖 Running multi-algorithm anomaly detection..."):
-            try:
-                algorithm_results = {}
-                
-                # Clean and prepare the data first
-                analysis_df = merged_df.copy()
-                
-                # Ensure numeric columns and handle None/NaN values properly
-                analysis_df['charge_amount_diff'] = pd.to_numeric(analysis_df['charge_amount_diff'], errors='coerce').fillna(0)
-                analysis_df['percentage_diff'] = pd.to_numeric(analysis_df['percentage_diff'], errors='coerce').fillna(0)
-                
-                # Remove any remaining None values
-                analysis_df = analysis_df.replace([None], 0)
-                
-                # Create features with clean data
-                features = analysis_df[['charge_amount_diff', 'percentage_diff']].astype(float)
-                
-                # Isolation Forest Implementation
-                if use_isolation_forest:
-                    try:
-                        iforest = IsolationForest(contamination=0.10, random_state=10)
-                        iforest_predictions = iforest.fit_predict(features)
-                        algorithm_results['Isolation Forest'] = {
-                            'anomalies': analysis_df[iforest_predictions == -1],
-                            'count': (iforest_predictions == -1).sum(),
-                            'color': '#FF6B6B'
-                        }
-                    except Exception as e:
-                        st.warning(f"Isolation Forest failed: {e}")
-
-                # Z-Score Implementation
-                if use_zscore:
-                    try:
-                        # Ensure no infinite or NaN values
-                        clean_features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
-                        z_scores = np.abs(stats.zscore(clean_features, nan_policy='omit'))
-                        z_scores = np.nan_to_num(z_scores, nan=0, posinf=0, neginf=0)
-                        zscore_mask = (z_scores > 2.5).any(axis=1)
-                        algorithm_results['Z-Score'] = {
-                            'anomalies': analysis_df[zscore_mask],
-                            'count': zscore_mask.sum(),
-                            'color': '#4ECDC4'
-                        }
-                    except Exception as e:
-                        st.warning(f"Z-Score detection failed: {e}")
-
-                # Autoencoder Implementation (Simplified)
-                if use_autoencoder:
-                    try:
-                        scaler = StandardScaler()
-                        clean_features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
-                        scaled_data = scaler.fit_transform(clean_features)
-                        
-                        pca = PCA(n_components=1)
-                        transformed = pca.fit_transform(scaled_data)
-                        reconstructed = pca.inverse_transform(transformed)
-                        
-                        reconstruction_error = np.mean((scaled_data - reconstructed) ** 2, axis=1)
-                        reconstruction_error = np.nan_to_num(reconstruction_error, nan=0)
-                        autoencoder_mask = reconstruction_error > np.percentile(reconstruction_error[reconstruction_error > 0], 95)
-                        
-                        algorithm_results['Autoencoder'] = {
-                            'anomalies': analysis_df[autoencoder_mask],
-                            'count': autoencoder_mask.sum(),
-                            'color': '#45B7D1'
-                        }
-                    except Exception as e:
-                        st.warning(f"Autoencoder failed: {e}")
-
-                # Rule-Based Detection
-                if use_rule_based:
-                    try:
-                        rule_anomalies = detect_rule_based_anomalies(analysis_df)
-                        algorithm_results['Rule-Based'] = {
-                            'anomalies': analysis_df.loc[rule_anomalies['index']] if not rule_anomalies.empty else pd.DataFrame(),
-                            'count': len(rule_anomalies),
-                            'color': '#FFA726',
-                            'details': rule_anomalies
-                        }
-                    except Exception as e:
-                        st.warning(f"Rule-based detection failed: {e}")
-
-                # Store results in session state
-                st.session_state.analysis_results = {
-                    'algorithm_results': algorithm_results,
-                    'analysis_df': analysis_df,
-                    'valid_results': {k: v for k, v in algorithm_results.items() if v['count'] > 0} if algorithm_results else {}
-                }
-
-                # Display Results
-                if algorithm_results:
-                    valid_results = st.session_state.analysis_results['valid_results']
-                    
-                    if valid_results:
-                        # Summary Metrics
-                        st.markdown("### 📊 Detection Results Summary")
-                        total_anomalies = sum(result['count'] for result in valid_results.values())
-                        total_records = len(analysis_df)
-                        anomaly_rate = (total_anomalies / total_records * 100) if total_records > 0 else 0
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Total Records", f"{total_records:,}")
-                        with col2:
-                            st.metric("Anomalies Found", f"{total_anomalies:,}")
-                        with col3:
-                            st.metric("Anomaly Rate", f"{anomaly_rate:.1f}%")
-                        with col4:
-                            st.metric("Algorithms Used", len(valid_results))
-
-                        # Algorithm Comparison
-                        st.markdown("#### 🔬 Algorithm Performance")
-                        algo_names = list(valid_results.keys())
-                        algo_counts = [result['count'] for result in valid_results.values()]
-                        algo_colors = [result['color'] for result in valid_results.values()]
-                        
-                        fig_comparison = px.bar(
-                            x=algo_names, y=algo_counts,
-                            title="Anomalies Detected by Each Algorithm",
-                            labels={'x': 'Algorithm', 'y': 'Anomaly Count'},
-                            color=algo_names, color_discrete_sequence=algo_colors
-                        )
-                        st.plotly_chart(fig_comparison, use_container_width=True)
-
-                        # Unified Visualization Section
-                        if 'Rule-Based' in valid_results and not valid_results['Rule-Based']['details'].empty:
-                            st.markdown("#### 📋 Rule-Based Anomaly Details")
-                            
-                            # Create a table for rule-based anomalies
-                            rule_details = valid_results['Rule-Based']['details']
-                            
-                            # Convert to DataFrame for better display
-                            anomaly_table_data = []
-                            for _, anomaly in rule_details.iterrows():
-                                anomaly_table_data.append({
-                                    'Transaction ID': anomaly['index'],
-                                    'Actual Charge': f"${anomaly['actual_charge']:.2f}",
-                                    'Recommended Min': f"${anomaly['recommended_min']:.2f}",
-                                    'Recommended Max': f"${anomaly['recommended_max']:.2f}",
-                                    'Severity': anomaly['severity'],
-                                    'Reasons': '; '.join(anomaly['reasons'])
-                                })
-                            
-                            anomaly_df = pd.DataFrame(anomaly_table_data)
-                            
-                            # Display the table
-                            st.dataframe(
-                                anomaly_df,
-                                use_container_width=True,
-                                height=min(400, len(anomaly_df) * 35 + 40),
-                                hide_index=True
-                            )
-
-                        # Mark anomalies in the analysis dataframe
-                        analysis_df['is_anomaly'] = False
-                        for result in valid_results.values():
-                            if not result['anomalies'].empty:
-                                analysis_df.loc[result['anomalies'].index, 'is_anomaly'] = True
-
-                        # Scatter Plot
-                        st.markdown("#### 📈 Anomaly Visualization")
-                        fig_scatter = px.scatter(
-                            analysis_df, x='charge_amount_diff', y='percentage_diff',
-                            color='is_anomaly', 
-                            title="Charge Amount vs Percentage Differences",
-                            color_discrete_map={True: '#FF6B6B', False: '#4ECDC4'},
-                            hover_data=['transaction_type_id'],
-                            size_max=10
-                        )
-                        st.plotly_chart(fig_scatter, use_container_width=True)
-
-                        # DOWNLOAD SECTION
-                        st.markdown("---")
-                        st.markdown("## 💾 Export Analysis Results")
-                        st.markdown('<div class="download-section">', unsafe_allow_html=True)
-                        
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            # Export anomaly data
-                            anomaly_export_df = analysis_df[analysis_df['is_anomaly']].copy()
-                            if not anomaly_export_df.empty:
-                                csv_anomalies = anomaly_export_df.to_csv(index=False)
-                                st.download_button(
-                                    label="📥 Download Anomaly Data",
-                                    data=csv_anomalies,
-                                    file_name=f"anomaly_data_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                                    mime="text/csv",
-                                    use_container_width=True,
-                                    help="Download only the transactions flagged as anomalies"
-                                )
-                            else:
-                                st.info("No anomalies to export")
-
-                        with col2:
-                            # Export full analysis
-                            csv_full = analysis_df.to_csv(index=False)
-                            st.download_button(
-                                label="📊 Download Full Analysis",
-                                data=csv_full,
-                                file_name=f"complete_analysis_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                                mime="text/csv",
-                                use_container_width=True,
-                                help="Download the complete dataset with anomaly flags"
-                            )
-
-                        with col3:
-                            # Export algorithm results summary
-                            summary_data = []
-                            for algo_name, result in valid_results.items():
-                                summary_data.append({
-                                    'Algorithm': algo_name,
-                                    'Anomalies_Detected': result['count'],
-                                    'Success_Rate': f"{(result['count'] / total_records * 100):.1f}%"
-                                })
-                            
-                            summary_df = pd.DataFrame(summary_data)
-                            csv_summary = summary_df.to_csv(index=False)
-                            st.download_button(
-                                label="📈 Download Summary Report",
-                                data=csv_summary,
-                                file_name=f"analysis_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                                mime="text/csv",
-                                use_container_width=True,
-                                help="Download algorithm performance summary"
-                            )
-
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                    else:
-                        st.info("✅ No anomalies detected by any algorithm")
-                else:
-                    st.info("✅ No algorithms produced results")
-
-            except Exception as e:
-                st.error(f"❌ Analysis failed: {str(e)}")
-
-    # DATA EXPLORER SECTION
-    st.markdown("---")
-    st.markdown("## 📋 Data Explorer")
-    
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        st.info("Explore the complete dataset used for analysis")
-    
-    with col2:
-        if st.button("📖 Toggle Data View", use_container_width=True):
-            st.session_state.view_raw_data = not st.session_state.view_raw_data
+        if st.button("🔄 Refresh All Data", use_container_width=True):
+            if 'data_loaded' in st.session_state:
+                st.session_state.data_loaded = False
             st.rerun()
+        
+        if st.button("Run Full Analysis", use_container_width=True):
+            st.session_state.run_full_analysis = True
+            st.rerun()
+        
+        if st.button("📊 Generate Report", use_container_width=True):
+            st.session_state.generate_report = True
+            st.rerun()
+        
+        st.markdown("---")
+        
+        
+        
+        # System Information
+        st.subheader("ℹ️ System Info")
+        st.write(f"**Last Updated:**")
+        st.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        
+        if 'differences_table' in st.session_state:
+            data = st.session_state.differences_table
+            if not data.empty:
+                st.write(f"**Records:** {len(data):,}")
+                st.write(f"**Transaction Types:** {data['transaction_type_id'].nunique()}")
+        
+        st.markdown("---")
+        
+        # Settings
+        st.subheader("⚙️ Settings")
+        auto_refresh = st.checkbox("Auto-refresh data", value=False)
+        if auto_refresh:
+            refresh_interval = st.slider("Refresh interval (minutes)", 1, 60, 5)
+        
+        st.markdown("---")
+        
+        # Help & Support
+        st.subheader("❓ Help")
+        if st.button("View Documentation", use_container_width=True):
+            st.info("Documentation would open here")
+        if st.button("Contact Support", use_container_width=True):
+            st.info("Support contact form would appear here")
 
-    if st.session_state.view_raw_data:
-        st.markdown("#### Complete Dataset")
-        st.dataframe(merged_df, use_container_width=True, height=400)
+    # ===== MAIN CONTENT =====
+    # Main dashboard header
+    st.title("Revenue Assurance Dashboard")
+    st.markdown("### AI-Powered Fee Validation and Anomaly Detection Platform")
+    
+    # Load data once at the beginning
+    if 'data_loaded' not in st.session_state:
+        with st.spinner("🔄 Loading data from databases..."):
+            charges_df, recommended_prices_df, differences_table = load_charges_and_recommendations()
+            st.session_state.charges_df = charges_df
+            st.session_state.recommended_prices_df = recommended_prices_df
+            st.session_state.differences_table = differences_table
+            st.session_state.data_loaded = True
+    
+    # Access data from session state
+    charges_df = st.session_state.charges_df
+    recommended_prices_df = st.session_state.recommended_prices_df
+    differences_table = st.session_state.differences_table
+    
+    # Create tabs with spaced titles
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "   📊 Dashboard Overview   ", 
+        "   🔍 Anomaly Detection   ", 
+        "   📈 Data Analysis   ", 
+        "   📊 Visualizations   ", 
+        "   💾 Export Data   "
+    ])
+    
+    with tab1:
+        st.header("📊 Dashboard Overview")
         
-        # Data Export Options
-        st.markdown("#### 📤 Export Raw Data")
-        export_col1, export_col2 = st.columns(2)
+        if not differences_table.empty:
+            # Display summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Total Records", len(differences_table))
+            
+            with col2:
+                avg_charge_diff = differences_table['charge_amount_diff'].mean()
+                st.metric("Avg Charge Diff", f"${avg_charge_diff:.2f}")
+            
+            with col3:
+                avg_percentage_diff = differences_table['percentage_diff'].mean()
+                st.metric("Avg % Diff", f"{avg_percentage_diff:.1f}%")
+            
+            with col4:
+                high_diff_count = len(differences_table[differences_table['min_fee_percentage_diff'].abs() > 20])
+                st.metric("High Variance Records", high_diff_count)
+            
+
+            # Recent data preview
+            st.subheader("📋 Recent Data Preview")
+            st.dataframe(differences_table.head(10), use_container_width=True)
+            
+        else:
+            st.warning("⚠️ No data available. Please check your database connections.")
+            if st.button("🔄 Retry Loading Data", key="retry_main"):
+                st.session_state.data_loaded = False
+                st.rerun()
+
+        # Quick stats
+        col1, col2 = st.columns(2)
         
-        with export_col1:
-            csv_raw = merged_df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download Raw CSV",
-                data=csv_raw,
-                file_name=f"raw_transaction_data_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+        with col1:
+            st.subheader("📋 Data Summary")
+            st.info(f"**Charges Loaded:** {len(charges_df)}")
+            st.info(f"**Recommendations Loaded:** {len(recommended_prices_df)}")
+            st.info(f"**Merged Records:** {len(differences_table)}")
+            st.info(f"**Transaction Types:** {differences_table['transaction_type_id'].nunique()}")
+            
+            
+            
+            
+    
+    with tab2:
+        st.header("🔍 Anomaly Detection")
         
-        with export_col2:
-            # Create a basic statistics report
-            stats_report = f"""
-Revenue Assurance Data Summary
+        if differences_table.empty:
+            st.warning("No data available for analysis")
+        else:
+            # Check if full analysis was triggered from sidebar
+            if st.session_state.get('run_full_analysis', False):
+                st.success("🚀 Running full analysis with all algorithms...")
+                # Reset the flag
+                st.session_state.run_full_analysis = False
+                # Set all algorithms to run
+                use_iforest = True
+                use_zscore = True
+                use_autoencoder = True
+                use_rule_based = True
+            else:
+                # Algorithm selection
+                st.subheader("Select Detection Algorithms")
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    use_iforest = st.checkbox("🌲 Isolation Forest", value=True)
+                with col2:
+                    use_zscore = st.checkbox("📊 Z-Score", value=True)
+                with col3:
+                    use_autoencoder = st.checkbox("🧠 Autoencoder", value=False)
+                with col4:
+                    use_rule_based = st.checkbox("📏 Rule-Based", value=True)
+            
+            if st.button("🚀 Run Anomaly Detection", type="primary", use_container_width=True) or st.session_state.get('run_full_analysis', False):
+                all_anomalies = {}
+                
+                # Run selected algorithms
+                if use_iforest:
+                    with st.spinner("Running Isolation Forest..."):
+                        merged_iforest, anomalies_iforest = detect_anomalies_iforest(differences_table.copy())
+                        all_anomalies['Isolation Forest'] = anomalies_iforest
+                
+                if use_zscore:
+                    with st.spinner("Running Z-Score Detection..."):
+                        merged_zscore, anomalies_zscore = detect_anomalies_zscore(differences_table.copy())
+                        all_anomalies['Z-Score'] = anomalies_zscore
+                
+                if use_autoencoder:
+                    with st.spinner("Running Autoencoder..."):
+                        merged_autoencoder, anomalies_autoencoder = detect_anomalies_autoencoder(differences_table.copy())
+                        all_anomalies['Autoencoder'] = anomalies_autoencoder
+                
+                if use_rule_based:
+                    with st.spinner("Running Rule-Based Detection..."):
+                        anomalies_rule_based = detect_rule_based_anomalies(differences_table)
+                        all_anomalies['Rule-Based'] = anomalies_rule_based
+                
+                # Display summary
+                st.subheader("📊 Detection Summary")
+                summary_data = []
+                for algo_name, anomalies in all_anomalies.items():
+                    if not anomalies.empty:
+                        summary_data.append({
+                            'Algorithm': algo_name,
+                            'Anomalies Found': len(anomalies),
+                            'Detection Rate': f"{(len(anomalies) / len(differences_table) * 100):.1f}%"
+                        })
+                
+                if summary_data:
+                    summary_df = pd.DataFrame(summary_data)
+                    st.dataframe(summary_df, use_container_width=True)
+                    
+                    # Show detailed rule-based anomalies
+                    if 'Rule-Based' in all_anomalies and not all_anomalies['Rule-Based'].empty:
+                        st.subheader("📋 Rule-Based Anomaly Details")
+                        st.dataframe(all_anomalies['Rule-Based'], use_container_width=True)
+                        
+                        # Visualize rule-based anomalies - FIXED: Use absolute values for size
+                        st.subheader("📈 Rule-Based Anomaly Visualization")
+                        anomalies_df = all_anomalies['Rule-Based'].copy()
+                        # Use absolute values for size to avoid negative values
+                        anomalies_df['size_value'] = np.abs(anomalies_df['charge_amount_diff'])
+                        
+                        fig = px.scatter(anomalies_df,
+                                       x='charge_amount_diff', 
+                                       y='percentage_diff',
+                                       color='severity',
+                                       size='size_value',  # Use absolute values
+                                       hover_data=['transaction_type_id', 'charge_type'],
+                                       title='Rule-Based Anomalies by Severity',
+                                       color_discrete_map={
+                                           'high': '#ff4444',
+                                           'medium': '#ffaa00', 
+                                           'low': '#44ff44'
+                                       })
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.success("✅ No anomalies detected by any algorithm")
+    
+    with tab3:
+        st.header("📈 Data Analysis")
+        
+        if differences_table.empty:
+            st.warning("No data available for analysis")
+        else:
+            st.subheader("Differences Analysis")
+            st.dataframe(differences_table, use_container_width=True, height=400)
+            
+            # Statistical summary
+            st.subheader("Statistical Summary")
+            st.dataframe(differences_table.describe(), use_container_width=True)
+            
+            # Correlation analysis
+            st.subheader("Correlation Analysis")
+            numeric_columns = differences_table.select_dtypes(include=[np.number]).columns
+            correlation_matrix = differences_table[numeric_columns].corr()
+            
+            fig, ax = plt.subplots(figsize=(10, 8))
+            sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0, ax=ax)
+            plt.title('Correlation Matrix')
+            st.pyplot(fig)
+            
+            # Top differences
+            st.subheader("🔝 Top Differences")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Largest Charge Amount Differences:**")
+                top_charge_diff = differences_table.nlargest(5, 'charge_amount_diff')[['transaction_type_id', 'charge_amount_diff']]
+                st.dataframe(top_charge_diff, use_container_width=True)
+            
+            with col2:
+                st.write("**Largest Percentage Differences:**")
+                top_percentage_diff = differences_table.nlargest(5, 'percentage_diff')[['transaction_type_id', 'percentage_diff']]
+                st.dataframe(top_percentage_diff, use_container_width=True)
+    
+    with tab4:
+        st.header("📊 Visualizations")
+        
+        if differences_table.empty:
+            st.warning("No data available for visualization")
+        else:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Charge Amount Differences")
+                fig1 = px.histogram(differences_table, x='charge_amount_diff', 
+                                   title='Distribution of Charge Amount Differences',
+                                   nbins=50)
+                st.plotly_chart(fig1, use_container_width=True)
+            
+            with col2:
+                st.subheader("Percentage Differences")
+                fig2 = px.histogram(differences_table, x='percentage_diff',
+                                   title='Distribution of Percentage Differences',
+                                   nbins=50)
+                st.plotly_chart(fig2, use_container_width=True)
+            
+            # Scatter plot
+            st.subheader("Charge Amount vs Percentage Differences")
+            fig3 = px.scatter(differences_table, x='charge_amount_diff', y='percentage_diff',
+                             color='transaction_type_id',
+                             title='Charge Amount Differences vs Percentage Differences',
+                             hover_data=['charge_type'])
+            st.plotly_chart(fig3, use_container_width=True)
+            
+            # Box plots
+            st.subheader("Distribution by Transaction Type")
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig4 = px.box(differences_table, x='transaction_type_id', y='charge_amount_diff',
+                             title='Charge Amount Differences by Transaction Type')
+                st.plotly_chart(fig4, use_container_width=True)
+            
+            with col2:
+                fig5 = px.box(differences_table, x='transaction_type_id', y='percentage_diff',
+                             title='Percentage Differences by Transaction Type')
+                st.plotly_chart(fig5, use_container_width=True)
+    
+    with tab5:
+        st.header("💾 Export Data")
+        
+        if differences_table.empty:
+            st.warning("No data available for export")
+        else:
+            # Check if report generation was triggered from sidebar
+            if st.session_state.get('generate_report', False):
+                st.success("📄 Generating comprehensive report...")
+                # Reset the flag
+                st.session_state.generate_report = False
+            
+            st.subheader("Export Data")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                # Export differences table
+                csv_diff = differences_table.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Differences CSV",
+                    data=csv_diff,
+                    file_name=f"fee_differences_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            
+            with col2:
+                # Export charges data
+                if not charges_df.empty:
+                    csv_charges = charges_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Charges CSV",
+                        data=csv_charges,
+                        file_name=f"charges_data_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+            
+            with col3:
+                # Export recommendations data
+                if not recommended_prices_df.empty:
+                    csv_recs = recommended_prices_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Recommendations CSV",
+                        data=csv_recs,
+                        file_name=f"price_recommendations_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+            
+            # Export summary report
+            st.subheader("Summary Report")
+            if st.button("📄 Generate Summary Report", use_container_width=True) or st.session_state.get('generate_report', False):
+                summary_report = f"""
+Revenue Assurance Dashboard - Summary Report
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-Dataset Overview:
-- Total Records: {len(merged_df):,}
-- Total Transaction Amount: ${merged_df['charge_amount'].sum():,.2f}
-- Average Transaction: ${merged_df['charge_amount'].mean():.2f}
-- Unique Transaction Types: {merged_df['transaction_type_id'].nunique()}
+DATA OVERVIEW:
+- Total Charges Records: {len(charges_df)}
+- Total Recommendations: {len(recommended_prices_df)}
+- Merged Analysis Records: {len(differences_table)}
+- Unique Transaction Types: {differences_table['transaction_type_id'].nunique()}
 
-Statistical Summary:
-{merged_df[['charge_amount', 'charge_amount_diff', 'percentage_diff']].describe().to_string()}
-            """
-            st.download_button(
-                label="📄 Download Stats Report",
-                data=stats_report,
-                file_name=f"data_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
+KEY METRICS:
+- Average Charge Amount Difference: ${differences_table['charge_amount_diff'].mean():.2f}
+- Average Percentage Difference: {differences_table['percentage_diff'].mean():.1f}%
+- Maximum Charge Difference: ${differences_table['charge_amount_diff'].max():.2f}
+- Minimum Charge Difference: ${differences_table['charge_amount_diff'].min():.2f}
 
-    # Quick Navigation Section
-    st.markdown("---")
-    st.markdown("## 🚀 Quick Navigation")
-    st.info("Use the sidebar to navigate between different features and analysis tools.")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("**🤖 AI Analysis**")
-        st.write("Real-time AI-powered revenue analysis and insights")
-        
-    with col2:
-        st.markdown("**📊 Categorization**")
-        st.write("AI-assisted revenue categorization and mapping")
-        
-    with col3:
-        st.markdown("**🔍 Monitoring**")
-        st.write("Real-time transaction monitoring and alerts")
+STATISTICAL SUMMARY:
+{differences_table[['charge_amount_diff', 'percentage_diff']].describe().to_string()}
 
-    # System Status
-    st.markdown("## 🟢 System Status")
-    status_col1, status_col2, status_col3 = st.columns(3)
-    
-    with status_col1:
-        st.success("**All Systems Operational**")
-    
-    with status_col2:
-        st.info("**Last Updated**")
-        st.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    
-    with status_col3:
-        st.warning("**Need Help?**")
-        st.write("Check the documentation or contact support")
-
-    # Close content container
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # Footer
-    st.markdown("---")
-    st.markdown(
-        "<div style='text-align: center; color: #666; padding: 2rem;'>"
-        " **Revenue Assurance Dashboard** v2.0 | "
-        "Real-time Anomaly Detection & Revenue Optimization  "
-        "</div>",
-        unsafe_allow_html=True
-    )
+DATABASE CONNECTIONS:
+- Main Database: {'✅ Connected' if get_neon_connection(NEON_DB_MAIN) else '❌ Failed'}
+- Price Database: {'✅ Connected' if get_neon_connection(NEON_DB_PRICE) else '❌ Failed'}
+                """
+                
+                st.download_button(
+                    label="📥 Download Summary Report",
+                    data=summary_report,
+                    file_name=f"revenue_assurance_summary_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
 
 if __name__ == "__main__":
     main()

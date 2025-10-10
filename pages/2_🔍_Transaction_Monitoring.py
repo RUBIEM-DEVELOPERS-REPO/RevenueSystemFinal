@@ -28,31 +28,31 @@ st.caption("Advanced monitoring + Pattern recognition + Anomaly detection + Fee 
 open_key = "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"
 client = OpenAI(api_key=open_key) if open_key else None
 
-# --- Database Connections ---
-conn1_params = {
-    "host": "localhost",
-    "database": "dummydb",
-    "user": "dummydata",
-    "password": "Test123",
-    "port": "5433"
+# --- CORRECTED NEON DATABASE CONNECTIONS ---
+# Database 1: Main database (transactions, charges)
+NEON_DB_MAIN = {
+    "host": "ep-frosty-dawn-ad0cnbjn-pooler.c-2.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "user": "neondb_owner",
+    "password": "npg_XCO6HPNfw7El",
+    "port": 5432
 }
 
-conn_charges_params = {
-    "host": "localhost",
-    "database": "core_banking_system",
-    "user": "bankuser",
-    "password": "Test123",
-    "port": "5433"
-}
-
-conn2_params = {
+# Database 2: Price recommendations database (transaction_types, price_recommendations)
+NEON_DB_PRICE = {
     "host": "ep-wispy-tooth-a4uiq32x.us-east-1.aws.neon.tech",
     "database": "neondb",
     "user": "neondb_owner",
     "password": "npg_7AlUWE8wkigH",
-    "port": 5432,
-    "sslmode": "require"
+    "port": 5432
 }
+
+# Assign connections correctly for different data sources
+conn1_params = NEON_DB_MAIN  # For transactions
+conn_charges_params = NEON_DB_MAIN  # For charges
+conn2_params = NEON_DB_PRICE  # For transaction_types and price_recommendations
+
+
 
 # ===================================================================
 # 1. CORE FUNCTIONS
@@ -660,84 +660,94 @@ def initialize_session_state():
 
 def load_transaction_data():
     try:
-        conn1 = psycopg2.connect(**conn1_params)
-        cur1 = conn1.cursor()
-        cur1.execute("SELECT * FROM transactions ORDER BY id ASC")
-        data = cur1.fetchall()
-        cols = [desc[0] for desc in cur1.description]
-        cur1.close()
-        conn1.close()
+        conn = psycopg2.connect(**conn1_params)
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM transactions ORDER BY id ASC")
+        data = cur.fetchall()
+        cols = [desc[0] for desc in cur.description]
+        cur.close()
+        conn.close()
         
         st.session_state.all_transactions = pd.DataFrame(data, columns=cols)
         st.session_state.current_index = 0
         st.session_state.transactions_df = pd.DataFrame()
         
-        st.success(f"✅ Loaded {len(st.session_state.all_transactions)} transactions from dummydb")
+        st.success(f"✅ Loaded {len(st.session_state.all_transactions)} transactions from Main DB")
+        return True
         
     except Exception as e:
-        st.error(f"Could not load transactions from dummydb: {e}")
+        st.error(f"Could not load transactions from Main DB: {e}")
         return False
-    return True
 
 def load_transaction_types():
     try:
-        conn2 = psycopg2.connect(**conn2_params)
-        cur2 = conn2.cursor()
+        conn = psycopg2.connect(**conn2_params)
+        cur = conn.cursor()
         
-        cur2.execute("SELECT * FROM transaction_types")
-        types = pd.DataFrame(cur2.fetchall(), columns=[d[0] for d in cur2.description])
+        # First, let's see what tables and columns actually exist
+        cur.execute("""
+            SELECT table_name, column_name 
+            FROM information_schema.columns 
+            WHERE table_schema = 'public' 
+            ORDER BY table_name, ordinal_position
+        """)
+        all_columns = cur.fetchall()
         
-        cur2.close()
-        conn2.close()
+        # Check what's in transaction_types table specifically
+        cur.execute("SELECT * FROM transaction_types LIMIT 1")
+        if cur.description:
+            columns = [desc[0] for desc in cur.description]
+            st.write(f"📊 Columns in transaction_types table: {columns}")
             
-        st.session_state.transaction_types = types
-        st.success("✅ Loaded transaction types from Neon")
+            # Get all data
+            cur.execute("SELECT * FROM transaction_types")
+            types_data = cur.fetchall()
+            st.session_state.transaction_types = pd.DataFrame(types_data, columns=columns)
+            st.success(f"✅ Loaded {len(st.session_state.transaction_types)} transaction types from Price DB")
+        else:
+            st.warning("No transaction_types table found or table is empty")
+            st.session_state.transaction_types = pd.DataFrame()
+            
+        cur.close()
+        conn.close()
         
     except Exception as e:
-        st.warning(f"Could not load transaction mappings from Neon: {e}")
+        st.warning(f"Could not load transaction types from Price DB: {e}")
         st.session_state.transaction_types = pd.DataFrame()
 
 def load_charges_data():
     try:
-        conn_charges = psycopg2.connect(**conn_charges_params)
-        cur_charges = conn_charges.cursor()
-        cur_charges.execute("""
-            SELECT transaction_type_id, charge_type, charge_range_min, charge_range_max, charge_amount, charge_percentage
-            FROM charges
-        """)
-        charges_data = cur_charges.fetchall()
-        charges_df = pd.DataFrame(charges_data, columns=[
-            "transaction_type_id", "charge_type", "charge_range_min", "charge_range_max", "charge_amount", "charge_percentage"
-        ])
-        cur_charges.close()
-        conn_charges.close()
-        st.session_state.charges = charges_df
-        st.success("✅ Loaded charges from core_banking_system")
+        conn = psycopg2.connect(**conn_charges_params)
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM charges")
+        charges_data = cur.fetchall()
+        charges_cols = [desc[0] for desc in cur.description]
+        cur.close()
+        conn.close()
+        
+        st.session_state.charges = pd.DataFrame(charges_data, columns=charges_cols)
+        st.success("✅ Loaded charges from Main DB")
         return True
     except Exception as e:
-        st.warning(f"Could not load charges from core_banking_system: {e}")
+        st.warning(f"Could not load charges from Main DB: {e}")
         st.session_state.charges = pd.DataFrame()
         return False
 
 def load_price_recommendations():
     try:
-        conn2 = psycopg2.connect(**conn2_params)
-        cur2 = conn2.cursor()
-        cur2.execute("""
-            SELECT transaction_type_id, recommended_min_fee, recommended_max_fee, recommended_flat_fee, recommended_percentage_fee
-            FROM price_recommendations
-        """)
-        recommended_prices_data = cur2.fetchall()
-        recs = pd.DataFrame(recommended_prices_data, columns=[
-            "transaction_type_id", "recommended_min_fee", "recommended_max_fee", "recommended_flat_fee", "recommended_percentage_fee"
-        ])
-        cur2.close()
-        conn2.close()
-        st.session_state.price_recommendations = recs
-        st.success("✅ Loaded price recommendations from Neon")
+        conn = psycopg2.connect(**conn2_params)
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM price_recommendations")
+        recommended_prices_data = cur.fetchall()
+        recs_cols = [desc[0] for desc in cur.description]
+        cur.close()
+        conn.close()
+        
+        st.session_state.price_recommendations = pd.DataFrame(recommended_prices_data, columns=recs_cols)
+        st.success("✅ Loaded price recommendations from Price DB")
         return True
     except Exception as e:
-        st.warning(f"Could not load recommendations from Neon: {e}")
+        st.warning(f"Could not load recommendations from Price DB: {e}")
         st.session_state.price_recommendations = pd.DataFrame()
         return False
 
@@ -752,10 +762,10 @@ popup_system = PopupNotificationSystem()
 # Initialize and Load Data
 initialize_session_state()
 
-with st.spinner("Loading data from databases..."):
+with st.spinner("Loading data from Neon database..."):
     if st.session_state.all_transactions.empty:
         if not load_transaction_data():
-            st.error("Failed to load transaction data from dummydb.")
+            st.error("Failed to load transaction data from Neon DB.")
     
     if st.session_state.transaction_types.empty:
         load_transaction_types()
@@ -840,22 +850,44 @@ if st.session_state.analysis_started and not st.session_state.all_transactions.e
         # Get next batch of transactions
         batch_df = st.session_state.all_transactions.iloc[st.session_state.current_index:end_index].copy()
         
-        # STEP 1: Merge with transaction types
-        if not st.session_state.transaction_types.empty:
-            batch_df = batch_df.merge(
-                st.session_state.transaction_types[['transaction_type_id', 'transaction_type_name', 'category_id']], 
-                on='transaction_type_id', 
-                how='left'
-            )
+        # STEP 1: Only merge with transaction types if we have the right columns
+        if (not st.session_state.transaction_types.empty and 
+            'transaction_type_id' in batch_df.columns and
+            'transaction_type_id' in st.session_state.transaction_types.columns):
+            
+            # Check what additional columns we can merge
+            available_columns = st.session_state.transaction_types.columns.tolist()
+            merge_cols = ['transaction_type_id']  # Always include the ID for merging
+            
+            # Add name column if available
+            if 'transaction_type_name' in available_columns:
+                merge_cols.append('transaction_type_name')
+            elif 'name' in available_columns:
+                merge_cols.append('name')
+            elif 'type_name' in available_columns:
+                merge_cols.append('type_name')
+            
+            try:
+                batch_df = batch_df.merge(
+                    st.session_state.transaction_types[merge_cols], 
+                    on='transaction_type_id', 
+                    how='left'
+                )
+            except Exception as e:
+                st.warning(f"Could not merge transaction types: {e}")
+                # Continue without transaction type names
+        else:
+            # If we can't merge, at least ensure we have a placeholder for transaction type name
+            if 'transaction_type_name' not in batch_df.columns and 'transaction_type_id' in batch_df.columns:
+                batch_df['transaction_type_name'] = 'Type ' + batch_df['transaction_type_id'].astype(str)
         
-        # STEP 2: Add fee_applied column if missing (CRITICAL FIX)
+        # STEP 2: Add fee_applied column if missing
         if 'fee_applied' not in batch_df.columns:
-            # Create realistic fee estimates
             batch_df['fee_applied'] = batch_df['amount'].apply(
                 lambda x: safe_convert_to_float(x) * 0.025  # 2.5% fee
             )
         
-        # STEP 3: Add recommended fee columns if missing (CRITICAL FIX)
+        # STEP 3: Add recommended fee columns if missing
         if 'recommended_min_fee' not in batch_df.columns:
             batch_df['recommended_min_fee'] = batch_df['amount'].apply(
                 lambda x: safe_convert_to_float(x) * 0.015  # 1.5% min
@@ -866,7 +898,7 @@ if st.session_state.analysis_started and not st.session_state.all_transactions.e
                 lambda x: safe_convert_to_float(x) * 0.035  # 3.5% max
             )
         
-        # STEP 4: RUN ANOMALY DETECTION (CRITICAL FIX)
+        # STEP 4: RUN ANOMALY DETECTION
         batch_df = detect_rule_based_anomalies(batch_df)
         
         # STEP 5: Automated fee compliance analysis
@@ -1028,6 +1060,17 @@ if st.session_state.current_tab == "live":
                     display_df["amount_converted"] = display_df["amount"] * exchange_rate
                 else:
                     display_df["amount_converted"] = display_df["amount"]
+                display_df["amount_converted"] = display_df["amount_converted"].round(2)
+
+            # In the Live tab and other display sections, replace references to:
+                # 'transaction_type_name' with safe alternatives
+
+                # For example, in the Live tab display:
+                display_cols = ['id', 'amount_converted', 'currency']
+                if 'transaction_type_name' in display_df.columns:
+                    display_cols.append('transaction_type_name')
+                elif 'transaction_type_id' in display_df.columns:
+                    display_cols.append('transaction_type_id')
             
             # Basic columns to show
             display_cols = ['id', 'amount_converted', 'currency', 'transaction_type_name']
@@ -1883,3 +1926,8 @@ elif st.session_state.current_tab == "simulator":
             - Anomaly detection baselines
             - Projected scaling based on historical patterns
             """)
+
+# Auto-refresh for live streaming
+if st.session_state.analysis_started and st.session_state.current_index < len(st.session_state.all_transactions):
+    time.sleep(refresh_rate)
+    st.rerun()
