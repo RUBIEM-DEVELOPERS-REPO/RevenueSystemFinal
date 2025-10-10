@@ -2,26 +2,50 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from utils.database import get_transaction_data
+import psycopg2
 
 st.set_page_config(page_title="Top Transaction Types", layout="wide")
-st.title(" Top Transaction Types Analysis")
+st.title("Top Transaction Types Analysis")
+
+# Database Connection Parameters
+NEON_DB_MAIN = {
+    "host": "ep-frosty-dawn-ad0cnbjn-pooler.c-2.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "user": "neondb_owner",
+    "password": "npg_XCO6HPNfw7El",
+    "port": 5432
+}
+
+def get_transaction_data():
+    """Fetch transaction data from Neon database"""
+    try:
+        conn = psycopg2.connect(**NEON_DB_MAIN)
+        query = "SELECT * FROM transactions ORDER BY created_at DESC LIMIT 200"
+        transactions_df = pd.read_sql(query, conn)
+        conn.close()
+        return transactions_df
+    except Exception as e:
+        st.error(f"Error connecting to database: {e}")
+        return pd.DataFrame()
 
 # Load data
 try:
     transactions_df = get_transaction_data()
 except Exception as e:
-    st.error(f"❌ Error loading data: {e}")
+    st.error(f"Error loading data: {e}")
     transactions_df = pd.DataFrame()
 
 if not transactions_df.empty:
     # Ensure we have the required columns and proper data types
     if 'amount' not in transactions_df.columns:
-        st.error("❌ 'amount' column not found in transaction data")
+        st.error("'amount' column not found in transaction data")
         st.stop()
     
-    if 'transaction_type' not in transactions_df.columns:
-        st.error("❌ 'transaction_type' column not found in transaction data")
+    # Use transaction_type_name instead of transaction_type if available
+    transaction_type_col = 'transaction_type_name' if 'transaction_type_name' in transactions_df.columns else 'transaction_type'
+    
+    if transaction_type_col not in transactions_df.columns:
+        st.error("Transaction type column not found in transaction data")
         st.stop()
     
     # Safely convert amount to numeric
@@ -31,7 +55,7 @@ if not transactions_df.empty:
     valid_transactions = transactions_df[transactions_df['amount_numeric'].notna()]
     
     if valid_transactions.empty:
-        st.warning(" No valid transaction amounts found")
+        st.warning("No valid transaction amounts found")
         st.stop()
     
     # Summary metrics with safe calculations
@@ -39,25 +63,25 @@ if not transactions_df.empty:
     
     with col1:
         total_volume = valid_transactions['amount_numeric'].sum()
-        st.metric("Total Volume", f"${total_volume:,.2f}")
+        st.metric("Total Volume", f"{total_volume:,.2f}")
     
     with col2:
         avg_transaction = valid_transactions['amount_numeric'].mean()
-        st.metric("Average Transaction", f"${avg_transaction:,.2f}")
+        st.metric("Average Transaction", f"{avg_transaction:,.2f}")
     
     with col3:
         total_transactions = len(valid_transactions)
         st.metric("Total Transactions", f"{total_transactions:,}")
     
     with col4:
-        unique_types = valid_transactions['transaction_type'].nunique()
+        unique_types = valid_transactions[transaction_type_col].nunique()
         st.metric("Unique Types", unique_types)
     
     # Top transaction types by volume
     st.subheader("Top Transaction Types by Volume")
     
     # Group by transaction type with safe aggregation
-    type_volume = valid_transactions.groupby('transaction_type').agg({
+    type_volume = valid_transactions.groupby(transaction_type_col).agg({
         'amount_numeric': ['sum', 'count', 'mean']
     }).reset_index()
     
@@ -76,7 +100,7 @@ if not transactions_df.empty:
                 x='transaction_type', 
                 y='total_volume',
                 title="Top 10 Transaction Types by Volume",
-                labels={'total_volume': 'Total Volume ($)', 'transaction_type': 'Transaction Type'}
+                labels={'total_volume': 'Total Volume', 'transaction_type': 'Transaction Type'}
             )
             fig1.update_layout(xaxis_tickangle=-45)
             st.plotly_chart(fig1, use_container_width=True)
@@ -127,7 +151,7 @@ if not transactions_df.empty:
                 title="Transaction Type Analysis: Frequency vs Average Amount",
                 labels={
                     'transaction_count': 'Number of Transactions',
-                    'average_amount': 'Average Amount ($)',
+                    'average_amount': 'Average Amount',
                     'total_volume': 'Total Volume'
                 },
                 hover_data=['transaction_type', 'total_volume']
@@ -139,8 +163,8 @@ if not transactions_df.empty:
     
     # Format the numeric columns for display
     display_df = type_volume.copy()
-    display_df['total_volume'] = display_df['total_volume'].apply(lambda x: f"${x:,.2f}")
-    display_df['average_amount'] = display_df['average_amount'].apply(lambda x: f"${x:,.2f}")
+    display_df['total_volume'] = display_df['total_volume'].apply(lambda x: f"{x:,.2f}")
+    display_df['average_amount'] = display_df['average_amount'].apply(lambda x: f"{x:,.2f}")
     display_df['transaction_count'] = display_df['transaction_count'].apply(lambda x: f"{x:,}")
     
     st.dataframe(display_df, use_container_width=True)
@@ -148,7 +172,7 @@ if not transactions_df.empty:
     # Download option
     csv = type_volume.to_csv(index=False)
     st.download_button(
-        label="📥 Download Transaction Type Analysis as CSV",
+        label="Download Transaction Type Analysis as CSV",
         data=csv,
         file_name="transaction_type_analysis.csv",
         mime="text/csv"

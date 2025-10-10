@@ -1,19 +1,74 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
-from utils.database import get_transaction_data
+import psycopg2
 
-st.set_page_config(page_title="Revenue Forecasting", layout="wide")
-st.title("Revenue Forecasting & Analysis")
+st.set_page_config(page_title="Fee Validation", layout="wide")
+st.title("Fee Validation & Compliance")
+
+# Database Connection Parameters
+NEON_DB_MAIN = {
+    "host": "ep-frosty-dawn-ad0cnbjn-pooler.c-2.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "user": "neondb_owner",
+    "password": "npg_XCO6HPNfw7El",
+    "port": 5432
+}
+
+NEON_DB_PRICE = {
+    "host": "ep-wispy-tooth-a4uiq32x.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "user": "neondb_owner",
+    "password": "npg_7AlUWE8wkigH",
+    "port": 5432
+}
+
+def get_transaction_data():
+    """Fetch transaction data from main Neon database"""
+    try:
+        conn = psycopg2.connect(**NEON_DB_MAIN)
+        query = "SELECT * FROM transactions ORDER BY created_at DESC LIMIT 200"
+        transactions_df = pd.read_sql(query, conn)
+        conn.close()
+        return transactions_df
+    except Exception as e:
+        st.error(f"Error connecting to transactions database: {e}")
+        return pd.DataFrame()
+
+def get_charges_data():
+    """Fetch charges data from main Neon database"""
+    try:
+        conn = psycopg2.connect(**NEON_DB_MAIN)
+        query = "SELECT * FROM charges"
+        charges_df = pd.read_sql(query, conn)
+        conn.close()
+        return charges_df
+    except Exception as e:
+        st.error(f"Error connecting to charges database: {e}")
+        return pd.DataFrame()
+
+def get_price_recommendations():
+    """Fetch price recommendations from price Neon database"""
+    try:
+        conn = psycopg2.connect(**NEON_DB_PRICE)
+        query = "SELECT * FROM price_recommendations"
+        recommendations_df = pd.read_sql(query, conn)
+        conn.close()
+        return recommendations_df
+    except Exception as e:
+        st.error(f"Error connecting to price recommendations database: {e}")
+        return pd.DataFrame()
 
 # Load data
 try:
     transactions_df = get_transaction_data()
+    charges_df = get_charges_data()
+    recommendations_df = get_price_recommendations()
 except Exception as e:
     st.error(f"Error loading data: {e}")
     transactions_df = pd.DataFrame()
+    charges_df = pd.DataFrame()
+    recommendations_df = pd.DataFrame()
 
 def safe_convert_to_float(value):
     """Safely convert any value to float"""
@@ -29,357 +84,246 @@ def safe_convert_to_float(value):
     except (ValueError, TypeError):
         return 0.0
 
-if not transactions_df.empty:
-    # Convert and prepare data safely
+def verify_fee_compliance(transaction, charges_df, recommendations_df):
+    """Simple fee compliance verification"""
     try:
-        transactions_df['date'] = pd.to_datetime(transactions_df['created_at'], errors='coerce').dt.date
-        transactions_df['amount_numeric'] = transactions_df['amount'].apply(safe_convert_to_float)
+        amount = safe_convert_to_float(transaction.get("amount", 0))
+        fee_applied = safe_convert_to_float(transaction.get("fee_applied", 0))
         
-        # Filter out invalid dates and amounts
-        valid_data = transactions_df[
-            transactions_df['date'].notna() & 
-            transactions_df['amount_numeric'].notna() & 
-            (transactions_df['amount_numeric'] > 0)
-        ]
+        # Simple fee validation logic
+        expected_fee = amount * 0.02  # 2% expected fee
+        tolerance = 0.10  # 10% tolerance
         
-        if valid_data.empty:
-            st.warning("No valid transaction data with dates and amounts available")
-            st.stop()
-        
-        # Group by date
-        daily_revenue = valid_data.groupby('date')['amount_numeric'].sum().sort_index()
-        
-    except Exception as e:
-        st.error(f"Error processing data: {e}")
-        st.stop()
-    
-    # Current Performance Analysis
-    st.header("Current Performance Analysis")
-    
-    # Key metrics for the day
-    today_revenue = daily_revenue.iloc[-1] if len(daily_revenue) > 0 else 0
-    today_date = daily_revenue.index[-1] if len(daily_revenue) > 0 else "N/A"
-    total_transactions = len(valid_data[valid_data['date'] == daily_revenue.index[-1]]) if len(daily_revenue) > 0 else 0
-    avg_transaction = today_revenue / total_transactions if total_transactions > 0 else 0
-    
-    # Currency Performance Analysis
-    st.subheader("Currency Performance Analysis")
-    
-    if 'currency' in transactions_df.columns:
-        # Currency distribution analysis
-        currency_performance = valid_data.groupby('currency').agg({
-            'amount_numeric': ['sum', 'count', 'mean'],
-            'date': 'nunique'
-        }).round(2)
-        
-        # Flatten column names
-        currency_performance.columns = ['Total Revenue', 'Transaction Count', 'Average Amount', 'Days Active']
-        
-        # Calculate percentage of total revenue
-        total_all_currencies = currency_performance['Total Revenue'].sum()
-        currency_performance['Revenue Share'] = (currency_performance['Total Revenue'] / total_all_currencies * 100).round(1)
-        
-        # Display currency performance table
-        st.write("**Currency Performance Summary**")
-        
-        # Create formatted display table
-        display_currency = currency_performance.copy()
-        display_currency['Total Revenue'] = display_currency['Total Revenue'].apply(lambda x: f"{x:,.2f}")
-        display_currency['Average Amount'] = display_currency['Average Amount'].apply(lambda x: f"{x:,.2f}")
-        display_currency['Revenue Share'] = display_currency['Revenue Share'].apply(lambda x: f"{x}%")
-        
-        st.dataframe(
-            display_currency,
-            use_container_width=True,
-            column_config={
-                "Total Revenue": st.column_config.TextColumn("Total Revenue"),
-                "Transaction Count": st.column_config.NumberColumn("Transactions"),
-                "Average Amount": st.column_config.TextColumn("Avg Amount"),
-                "Days Active": st.column_config.NumberColumn("Active Days"),
-                "Revenue Share": st.column_config.TextColumn("Revenue Share")
+        if fee_applied < expected_fee * (1 - tolerance):
+            return {
+                "status": "violation",
+                "fee_status_type": "Undercharge",
+                "actual_fee": fee_applied,
+                "expected_fee": expected_fee,
+                "difference": fee_applied - expected_fee
             }
-        )
-        
-        # Currency visualization
-        st.write("**Currency Distribution**")
-        
-        # Create visualization
-        fig_currency = go.Figure()
-        
-        # Bar chart for revenue by currency
-        fig_currency.add_trace(go.Bar(
-            x=currency_performance.index,
-            y=currency_performance['Total Revenue'],
-            name='Total Revenue',
-            marker_color='#1f77b4',
-            text=currency_performance['Total Revenue'].apply(lambda x: f"{x:,.0f}"),
-            textposition='auto'
-        ))
-        
-        fig_currency.update_layout(
-            title="Revenue Distribution by Currency",
-            xaxis_title="Currency",
-            yaxis_title="Revenue Amount",
-            plot_bgcolor='white',
-            showlegend=False,
-            height=400
-        )
-        
-        st.plotly_chart(fig_currency, use_container_width=True)
-    
-    else:
-        st.info("Currency data not available in transaction records")
-    
-    # Revenue Performance Analysis
-    st.subheader("Revenue Performance Analysis")
-    
-    # Create comprehensive revenue performance table
-    revenue_metrics = []
-    
-    # Basic revenue metrics
-    revenue_metrics.append({
-        'Metric': 'Total Revenue',
-        'Value': f"{today_revenue:,.2f}",
-        'Description': 'Sum of all valid transactions',
-        'Status': 'High' if today_revenue > 1000 else 'Medium' if today_revenue > 500 else 'Low'
-    })
-    
-    revenue_metrics.append({
-        'Metric': 'Transaction Volume',
-        'Value': f"{total_transactions:,}",
-        'Description': 'Number of completed transactions',
-        'Status': 'High' if total_transactions > 50 else 'Medium' if total_transactions > 20 else 'Low'
-    })
-    
-    revenue_metrics.append({
-        'Metric': 'Average Transaction Value',
-        'Value': f"{avg_transaction:,.2f}",
-        'Description': 'Mean value per transaction',
-        'Status': 'High' if avg_transaction > 100 else 'Medium' if avg_transaction > 50 else 'Low'
-    })
-    
-    # Additional performance metrics
-    if len(daily_revenue) > 1:
-        # Calculate growth metrics
-        previous_revenue = daily_revenue.iloc[-2] if len(daily_revenue) > 1 else 0
-        daily_growth = ((today_revenue - previous_revenue) / previous_revenue * 100) if previous_revenue > 0 else 0
-        
-        revenue_metrics.append({
-            'Metric': 'Daily Growth Rate',
-            'Value': f"{daily_growth:+.1f}%",
-            'Description': 'Change from previous day',
-            'Status': 'High' if daily_growth > 10 else 'Medium' if daily_growth > 0 else 'Low'
-        })
-    
-    # Transaction efficiency metrics
-    if 'transaction_type_name' in valid_data.columns:
-        unique_types = valid_data['transaction_type_name'].nunique()
-        revenue_metrics.append({
-            'Metric': 'Product Diversity',
-            'Value': f"{unique_types} types",
-            'Description': 'Number of transaction categories',
-            'Status': 'High' if unique_types > 5 else 'Medium' if unique_types > 2 else 'Low'
-        })
-    
-    # Convert to DataFrame
-    revenue_df = pd.DataFrame(revenue_metrics)
-    
-    # Display revenue performance table
-    st.write("**Revenue Performance Metrics**")
-    
-    # Color coding for status
-    def color_status(status):
-        if status == 'High':
-            return 'background-color: #d4edda; color: #155724;'
-        elif status == 'Medium':
-            return 'background-color: #fff3cd; color: #856404;'
+        elif fee_applied > expected_fee * (1 + tolerance):
+            return {
+                "status": "violation", 
+                "fee_status_type": "Overcharge",
+                "actual_fee": fee_applied,
+                "expected_fee": expected_fee,
+                "difference": fee_applied - expected_fee
+            }
         else:
-            return 'background-color: #f8d7da; color: #721c24;'
-    
-    styled_df = revenue_df.style.apply(
-        lambda x: [color_status(x['Status']) for _ in x], 
-        axis=1,
-        subset=['Metric', 'Value', 'Description', 'Status']
-    )
-    
-    st.dataframe(
-        styled_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Metric": st.column_config.TextColumn("Performance Metric"),
-            "Value": st.column_config.TextColumn("Current Value"),
-            "Description": st.column_config.TextColumn("Metric Description"),
-            "Status": st.column_config.TextColumn("Performance Level")
-        }
-    )
-    
-    # Revenue performance visualization
-    st.write("**Revenue Performance Visualization**")
-    
-    # Create performance gauge chart
-    performance_score = min(100, (today_revenue / 2000) * 100) if today_revenue > 0 else 0  # Scale based on 2000 target
-    
-    fig_gauge = go.Figure(go.Indicator(
-        mode = "gauge+number+delta",
-        value = performance_score,
-        domain = {'x': [0, 1], 'y': [0, 1]},
-        title = {'text': "Revenue Performance Score"},
-        delta = {'reference': 50},
-        gauge = {
-            'axis': {'range': [None, 100]},
-            'bar': {'color': "darkblue"},
-            'steps': [
-                {'range': [0, 33], 'color': "lightgray"},
-                {'range': [33, 66], 'color': "gray"},
-                {'range': [66, 100], 'color': "darkgray"}
-            ],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': 90
+            return {
+                "status": "compliant",
+                "fee_status_type": "Normal",
+                "actual_fee": fee_applied,
+                "expected_fee": expected_fee,
+                "difference": fee_applied - expected_fee
             }
+    except Exception as e:
+        return {
+            "status": "error",
+            "fee_status_type": "Error",
+            "actual_fee": 0,
+            "expected_fee": 0,
+            "difference": 0
         }
-    ))
+
+if not transactions_df.empty:
+    # Verify fee compliance
+    with st.spinner("Validating fee compliance..."):
+        fee_results = []
+        for _, row in transactions_df.iterrows():
+            verification = verify_fee_compliance(row.to_dict(), charges_df, recommendations_df)
+            fee_results.append(verification)
+        
+        # Add fee analysis columns safely
+        for i, result in enumerate(fee_results):
+            transactions_df.at[transactions_df.index[i], 'fee_status'] = result.get('status', 'unknown')
+            transactions_df.at[transactions_df.index[i], 'fee_status_type'] = result.get('fee_status_type', 'Unknown')
+            transactions_df.at[transactions_df.index[i], 'actual_fee'] = result.get('actual_fee', 0)
+            transactions_df.at[transactions_df.index[i], 'expected_fee'] = result.get('expected_fee', 0)
+            transactions_df.at[transactions_df.index[i], 'fee_difference'] = result.get('difference', 0)
     
-    fig_gauge.update_layout(height=300)
-    st.plotly_chart(fig_gauge, use_container_width=True)
-    
-    # Revenue Overview
-    st.subheader("Revenue Overview")
-    
-    if len(daily_revenue) == 1:
-        # Single day visualization
-        fig = go.Figure()
-        
-        fig.add_trace(go.Indicator(
-            mode = "number",
-            value = today_revenue,
-            number = {'valueformat': ",.0f"},
-            title = {"text": "Total Revenue"},
-            domain = {'row': 0, 'column': 0}
-        ))
-        
-        fig.update_layout(
-            grid = {'rows': 1, 'columns': 1, 'pattern': "independent"},
-            height = 200,
-            paper_bgcolor = 'lightgray'
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Transaction breakdown
-        st.subheader("Transaction Breakdown")
-        
-        # By transaction type
-        if 'transaction_type_name' in valid_data.columns:
-            today_data = valid_data[valid_data['date'] == daily_revenue.index[-1]]
-            type_breakdown = today_data.groupby('transaction_type_name')['amount_numeric'].agg(['sum', 'count']).reset_index()
-            type_breakdown.columns = ['Transaction Type', 'Total Amount', 'Count']
-            
-            # Amount by type
-            fig_amount = px.bar(
-                type_breakdown,
-                x='Transaction Type',
-                y='Total Amount',
-                title="Revenue Distribution by Transaction Type",
-                color='Total Amount',
-                color_continuous_scale='blues'
-            )
-            fig_amount.update_layout(
-                xaxis_tickangle=-45,
-                plot_bgcolor='white'
-            )
-            st.plotly_chart(fig_amount, use_container_width=True)
-            
-            # Count by type
-            fig_count = px.pie(
-                type_breakdown,
-                values='Count',
-                names='Transaction Type',
-                title="Transaction Volume Distribution",
-                color_discrete_sequence=px.colors.sequential.Blues_r
-            )
-            st.plotly_chart(fig_count, use_container_width=True)
-    
+    # Ensure fee_status_type exists and count safely
+    if 'fee_status_type' in transactions_df.columns:
+        status_counts = transactions_df['fee_status_type'].value_counts()
     else:
-        # Multiple days available
-        st.subheader("Revenue Trend Analysis")
-        
-        # Show last 7 days if available, otherwise all available days
-        recent_days = daily_revenue.tail(min(7, len(daily_revenue)))
-        
-        fig_trend = px.line(
-            x=recent_days.index,
-            y=recent_days.values,
-            title="Revenue Trend - Last 7 Days",
-            labels={'x': 'Date', 'y': 'Revenue Amount'},
-            markers=True,
-            color_discrete_sequence=['#1f77b4']
-        )
-        fig_trend.update_layout(
-            plot_bgcolor='white',
-            xaxis=dict(showgrid=True, gridcolor='lightgray'),
-            yaxis=dict(showgrid=True, gridcolor='lightgray')
-        )
-        st.plotly_chart(fig_trend, use_container_width=True)
+        status_counts = pd.Series()
     
-    # Revenue Projections
-    st.header("Revenue Projections")
-    
-    st.write("Based on current performance, here are potential revenue projections:")
-    
-    col1, col2, col3 = st.columns(3)
+    # Fee compliance summary
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        # Weekly projection
-        weekly_proj = today_revenue * 7
-        st.metric("Weekly Projection", f"{weekly_proj:,.2f}")
-        st.caption("Based on current daily performance")
+        total = len(transactions_df)
+        st.metric("Total Transactions", total)
     
     with col2:
-        # Monthly projection
-        monthly_proj = today_revenue * 30
-        st.metric("Monthly Projection", f"{monthly_proj:,.2f}")
-        st.caption("30-day extrapolation")
+        compliant = status_counts.get('Normal', 0)
+        st.metric("Compliant", compliant, delta=f"{(compliant/total*100):.1f}%" if total > 0 else "0%")
     
     with col3:
-        # Annual projection
-        annual_proj = today_revenue * 365
-        st.metric("Annual Projection", f"{annual_proj:,.2f}")
-        st.caption("Full year estimate")
-
+        undercharges = status_counts.get('Undercharge', 0)
+        st.metric("Undercharges", undercharges, delta=f"{(undercharges/total*100):.1f}%" if total > 0 else "0%")
+    
+    with col4:
+        overcharges = status_counts.get('Overcharge', 0)
+        st.metric("Overcharges", overcharges, delta=f"{(overcharges/total*100):.1f}%" if total > 0 else "0%")
+    
+    # Visualization
+    if not status_counts.empty:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            fig1 = px.pie(
+                values=status_counts.values, 
+                names=status_counts.index, 
+                title="Fee Compliance Status",
+                color_discrete_map={
+                    'Normal': '#00ff00',
+                    'Undercharge': '#ffff00', 
+                    'Overcharge': '#ff0000',
+                    'Error': '#808080'
+                }
+            )
+            st.plotly_chart(fig1, use_container_width=True)
+        
+        with col2:
+            # Fee analysis by transaction type
+            if 'transaction_type_name' in transactions_df.columns:
+                fee_by_type = transactions_df.groupby(['transaction_type_name', 'fee_status_type']).size().reset_index(name='count')
+                if not fee_by_type.empty:
+                    fig2 = px.bar(
+                        fee_by_type, 
+                        x='transaction_type_name', 
+                        y='count', 
+                        color='fee_status_type',
+                        title="Fee Status by Transaction Type", 
+                        barmode='stack',
+                        color_discrete_map={
+                            'Normal': '#00ff00',
+                            'Undercharge': '#ffff00',
+                            'Overcharge': '#ff0000',
+                            'Error': '#808080'
+                        }
+                    )
+                    fig2.update_layout(xaxis_tickangle=-45)
+                    st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.info("No fee data available by transaction type")
+            else:
+                # Amount distribution by fee status
+                if 'amount' in transactions_df.columns:
+                    transactions_df['amount_numeric'] = pd.to_numeric(transactions_df['amount'], errors='coerce')
+                    valid_amounts = transactions_df[transactions_df['amount_numeric'].notna()]
+                    if not valid_amounts.empty:
+                        fig3 = px.box(
+                            valid_amounts,
+                            x='fee_status_type',
+                            y='amount_numeric',
+                            title="Transaction Amount Distribution by Fee Status",
+                            color='fee_status_type'
+                        )
+                        st.plotly_chart(fig3, use_container_width=True)
+    
+    # Fee difference analysis
+    st.subheader("Fee Difference Analysis")
+    
+    if 'fee_difference' in transactions_df.columns:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Fee difference distribution
+            fig4 = px.histogram(
+                transactions_df,
+                x='fee_difference',
+                color='fee_status_type',
+                title="Distribution of Fee Differences",
+                nbins=20,
+                color_discrete_map={
+                    'Normal': '#00ff00',
+                    'Undercharge': '#ffff00',
+                    'Overcharge': '#ff0000'
+                }
+            )
+            st.plotly_chart(fig4, use_container_width=True)
+        
+        with col2:
+            # Fee difference by amount
+            if 'amount' in transactions_df.columns:
+                transactions_df['amount_numeric'] = pd.to_numeric(transactions_df['amount'], errors='coerce')
+                valid_data = transactions_df[transactions_df['amount_numeric'].notna() & transactions_df['fee_difference'].notna()]
+                if not valid_data.empty:
+                    fig5 = px.scatter(
+                        valid_data,
+                        x='amount_numeric',
+                        y='fee_difference',
+                        color='fee_status_type',
+                        title="Fee Difference vs Transaction Amount",
+                        hover_data=['transaction_type_name'] if 'transaction_type_name' in transactions_df.columns else None,
+                        color_discrete_map={
+                            'Normal': '#00ff00',
+                            'Undercharge': '#ffff00',
+                            'Overcharge': '#ff0000'
+                        }
+                    )
+                    st.plotly_chart(fig5, use_container_width=True)
+    
+    # Detailed fee analysis table
+    st.subheader("Detailed Fee Analysis")
+    
+    # Build display columns safely
+    display_cols = ['id']
+    if 'transaction_type_name' in transactions_df.columns:
+        display_cols.append('transaction_type_name')
+    if 'amount' in transactions_df.columns:
+        display_cols.append('amount')
+    if 'fee_applied' in transactions_df.columns:
+        display_cols.append('fee_applied')
+    display_cols.extend(['fee_status_type', 'actual_fee', 'expected_fee', 'fee_difference'])
+    
+    # Only include columns that actually exist
+    display_cols = [col for col in display_cols if col in transactions_df.columns]
+    
+    if display_cols:
+        # Format numeric columns for display
+        display_df = transactions_df[display_cols].copy()
+        
+        # Safely format numeric columns
+        numeric_cols = ['amount', 'fee_applied', 'actual_fee', 'expected_fee', 'fee_difference']
+        for col in numeric_cols:
+            if col in display_df.columns:
+                display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
+                display_df[col] = display_df[col].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "N/A")
+        
+        st.dataframe(display_df, use_container_width=True, height=400)
+        
+        # Download option
+        csv = transactions_df[display_cols].to_csv(index=False)
+        st.download_button(
+            label="Download Fee Analysis as CSV",
+            data=csv,
+            file_name="fee_validation_analysis.csv",
+            mime="text/csv"
+        )
+    else:
+        st.warning("No columns available for display")
+    
 else:
     st.info("No transaction data available. Please check your database connection.")
 
-# Performance Insights
-with st.expander("Performance Insights"):
-    if not transactions_df.empty and len(daily_revenue) > 0:
-        today_data = valid_data[valid_data['date'] == daily_revenue.index[-1]]
-        
-        insights = []
-        
-        # Revenue insight
-        if today_revenue > 1000:
-            insights.append("Strong Revenue Performance: Current revenue exceeds 1000 threshold")
-        elif today_revenue < 100:
-            insights.append("Revenue Optimization Opportunity: Consider promotional activities to boost performance")
-        
-        # Transaction volume insight
-        if total_transactions > 50:
-            insights.append("High Transaction Volume: Strong customer engagement levels")
-        elif total_transactions < 10:
-            insights.append("Growth Opportunity: Focus on customer acquisition strategies")
-        
-        # Average transaction insight
-        if avg_transaction > 100:
-            insights.append("Premium Transaction Value: High average transaction indicates quality customer base")
-        elif avg_transaction < 20:
-            insights.append("Upsell Potential: Low average transaction value suggests bundle or cross-sell opportunities")
-        
-        if insights:
-            st.subheader("Key Observations")
-            for insight in insights:
-                st.success(insight)
+# Show charges and recommendations info
+with st.expander("Fee Structure Information"):
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Current Charges")
+        if not charges_df.empty:
+            st.dataframe(charges_df, use_container_width=True)
         else:
-            st.info("Current performance metrics are within expected ranges")
+            st.info("No charges data available")
+    
+    with col2:
+        st.subheader("Price Recommendations")
+        if not recommendations_df.empty:
+            st.dataframe(recommendations_df, use_container_width=True)
+        else:
+            st.info("No price recommendations available")

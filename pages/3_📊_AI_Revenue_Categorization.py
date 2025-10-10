@@ -9,43 +9,49 @@ import numpy as np
 # Page configuration
 st.set_page_config(
     page_title="AI Revenue Intelligence",
-    page_icon="",
     layout="wide"
 )
 
 def main():
-    st.title(" AI-Assisted Revenue Categorization")
+    st.title("AI-Assisted Revenue Categorization")
 
     # --- Enter API Key directly here ---
     OPENAI_API_KEY = "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"
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    # --- Fetch Transactions from dummydb ---
+    # --- Database Connection Parameters ---
+    # Main database for transactions and charges
+    NEON_DB_MAIN = {
+        "host": "ep-frosty-dawn-ad0cnbjn-pooler.c-2.us-east-1.aws.neon.tech",
+        "database": "neondb",
+        "user": "neondb_owner",
+        "password": "npg_XCO6HPNfw7El",
+        "port": 5432
+    }
+
+    # Price recommendations database for transaction_types and price_recommendations
+    NEON_DB_PRICE = {
+        "host": "ep-wispy-tooth-a4uiq32x.us-east-1.aws.neon.tech",
+        "database": "neondb",
+        "user": "neondb_owner",
+        "password": "npg_7AlUWE8wkigH",
+        "port": 5432
+    }
+
+    # --- Fetch Transactions from Main Neon DB ---
     try:
-        conn1 = psycopg2.connect(
-            host="localhost",
-            database="dummydb",
-            user="dummydata",
-            password="Test123",
-            port=5433
-        )
+        conn1 = psycopg2.connect(**NEON_DB_MAIN)
         transactions = pd.read_sql(
             "SELECT * FROM transactions ORDER BY created_at DESC LIMIT 200", conn1
         )
         conn1.close()
     except Exception as e:
-        st.error(f"❌ Error connecting to transactions database: {e}")
+        st.error(f"Error connecting to transactions database: {e}")
         transactions = pd.DataFrame()
 
-    # --- Fetch Mapping Tables from Neon ---
+    # --- Fetch Mapping Tables from Price Neon DB ---
     try:
-        conn2 = psycopg2.connect(
-            host="ep-wispy-tooth-a4uiq32x.us-east-1.aws.neon.tech",
-            database="neondb",
-            user="neondb_owner",
-            password="npg_7AlUWE8wkigH",
-            port=5432
-        )
+        conn2 = psycopg2.connect(**NEON_DB_PRICE)
         cur2 = conn2.cursor()
 
         cur2.execute("SELECT * FROM transaction_categories")
@@ -60,17 +66,17 @@ def main():
         cur2.close()
         conn2.close()
     except Exception as e:
-        st.error(f"❌ Error connecting to mapping database: {e}")
+        st.error(f"Error connecting to mapping database: {e}")
         categories = pd.DataFrame()
         subcategories = pd.DataFrame()
         types = pd.DataFrame()
 
     if transactions.empty:
-        st.error(" No transaction data available. Please check your database connections.")
+        st.error("No transaction data available. Please check your database connections.")
         return
 
     if categories.empty or types.empty:
-        st.error(" No mapping data available. Please check your database connections.")
+        st.error("No mapping data available. Please check your database connections.")
         return
 
     # --- Merge Mappings ---
@@ -81,12 +87,12 @@ def main():
     unmapped = merged[merged["category_name"].isnull()]
 
     # Create tabs for better organization
-    tab1, tab2, tab3 = st.tabs(["Categorization", " Analytics", " Revenue Insights"])
+    tab1, tab2, tab3 = st.tabs(["Categorization", "Analytics", "Revenue Insights"])
 
     with tab1:
         st.subheader("Unmapped Transactions")
         if unmapped.empty:
-            st.success("All transactions are mapped! ✅")
+            st.success("All transactions are mapped!")
         else:
             st.warning(f"{len(unmapped)} transactions need mapping")
 
@@ -119,7 +125,7 @@ def main():
                     return "Other", "Uncategorized"
 
             # Apply AI categorization
-            with st.spinner(" Generating AI suggestions..."):
+            with st.spinner("Generating AI suggestions..."):
                 suggestions = []
                 for idx, row in unmapped.iterrows():
                     category, subcategory = suggest_category_ai(row["transaction_type_name"])
@@ -135,7 +141,7 @@ def main():
             st.dataframe(suggestions_df)
 
             # --- Manual Override Form ---
-            st.subheader(" Manual Mapping")
+            st.subheader("Manual Mapping")
             with st.form("mapping_form"):
                 selected_id = st.selectbox("Pick a transaction to map", unmapped["id"])
                 selected_cat = st.selectbox("Category", categories["category_name"].unique())
@@ -146,18 +152,12 @@ def main():
 
                 selected_sub = st.selectbox("Subcategory", sub_options["subcategory_name"].unique())
 
-                if st.form_submit_button("✅ Approve Mapping"):
+                if st.form_submit_button("Approve Mapping"):
                     sub_id = sub_options[sub_options["subcategory_name"] == selected_sub]["subcategory_id"].iloc[0]
 
-                    # Update mapping in Neon (not dummydb)
+                    # Update mapping in Price Neon DB
                     try:
-                        conn2 = psycopg2.connect(
-                            host="ep-wispy-tooth-a4uiq32x.us-east-1.aws.neon.tech",
-                            database="neondb",
-                            user="neondb_owner",
-                            password="npg_7AlUWE8wkigH",
-                            port=5432
-                        )
+                        conn2 = psycopg2.connect(**NEON_DB_PRICE)
                         cur2 = conn2.cursor()
                         cur2.execute("""
                             UPDATE transaction_types 
@@ -177,7 +177,7 @@ def main():
 
     with tab2:
         # --- Revenue Analytics ---
-        st.subheader(" Revenue Analytics")
+        st.subheader("Revenue Analytics")
 
         if "amount" in merged.columns:
             # Currency selection
@@ -200,11 +200,11 @@ def main():
                 # Display metrics
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.metric("Total Revenue", f"${total_revenue:,.2f}")
+                    st.metric("Total Revenue", f"{total_revenue:,.2f}")
                 with col2:
                     st.metric("Total Transactions", f"{total_transactions:,}")
                 with col3:
-                    st.metric("Avg Transaction", f"${avg_transaction:.2f}")
+                    st.metric("Avg Transaction", f"{avg_transaction:.2f}")
 
                 # Revenue by category
                 revenue_summary = valid_data.groupby("category_name")['amount_converted'].sum().reset_index().sort_values('amount_converted', ascending=False)
@@ -214,7 +214,7 @@ def main():
                 
                 with col1:
                     # Pie chart
-                    st.write("**Revenue Distribution**")
+                    st.write("Revenue Distribution")
                     fig1, ax1 = plt.subplots(figsize=(8, 6))
                     ax1.pie(revenue_summary['amount_converted'], labels=revenue_summary["category_name"], autopct="%1.1f%%")
                     ax1.axis("equal")
@@ -222,7 +222,7 @@ def main():
 
                 with col2:
                     # Bar chart
-                    st.write("**Revenue by Category**")
+                    st.write("Revenue by Category")
                     fig2, ax2 = plt.subplots(figsize=(10, 6))
                     bars = ax2.bar(revenue_summary["category_name"], revenue_summary['amount_converted'])
                     ax2.set_xticks(range(len(revenue_summary["category_name"])))
@@ -233,14 +233,14 @@ def main():
                     for bar in bars:
                         height = bar.get_height()
                         ax2.text(bar.get_x() + bar.get_width()/2., height,
-                                f'${height:,.0f}',
+                                f'{height:,.0f}',
                                 ha='center', va='bottom')
                     
                     st.pyplot(fig2)
 
                 # Trend chart
                 if "created_at" in merged.columns:
-                    st.write("**Revenue Trends Over Time**")
+                    st.write("Revenue Trends Over Time")
                     merged["created_at"] = pd.to_datetime(merged["created_at"], errors="coerce")
                     valid_trend_data = merged[merged["created_at"].notna() & merged["category_name"].notna() & merged['amount_converted'].notna()]
                     
@@ -265,7 +265,7 @@ def main():
 
     with tab3:
         # --- Revenue Insights ---
-        st.subheader(" Revenue Insights")
+        st.subheader("Revenue Insights")
 
         def generate_revenue_insights(merged_df):
             """Generate insights from available transaction data"""
@@ -317,18 +317,18 @@ def main():
 
         if insights_data:
             # Key Metrics
-            st.write("###  Performance Overview")
+            st.write("Performance Overview")
             
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.metric("Total Revenue", f"${insights_data['total_revenue']:,.2f}")
+                st.metric("Total Revenue", f"{insights_data['total_revenue']:,.2f}")
             
             with col2:
                 st.metric("Total Transactions", f"{insights_data['total_transactions']:,}")
             
             with col3:
-                st.metric("Avg Transaction", f"${insights_data['avg_transaction']:.2f}")
+                st.metric("Avg Transaction", f"{insights_data['avg_transaction']:.2f}")
             
             with col4:
                 if 'latest_growth' in insights_data:
@@ -339,7 +339,7 @@ def main():
                     st.metric("Data Period", "Single Month")
 
             # Category Performance
-            st.write("###  Category Performance")
+            st.write("Category Performance")
             if 'category_stats' in insights_data:
                 category_stats = insights_data['category_stats']
                 
@@ -354,14 +354,14 @@ def main():
                     top_categories = category_stats.head(8)
                     bars = ax.bar(top_categories.index, top_categories['revenue'])
                     ax.set_title("Top Revenue Categories")
-                    ax.set_ylabel("Revenue ($)")
+                    ax.set_ylabel("Revenue")
                     ax.tick_params(axis='x', rotation=45)
                     
                     # Add value labels
                     for bar in bars:
                         height = bar.get_height()
                         ax.text(bar.get_x() + bar.get_width()/2., height,
-                               f'${height:,.0f}', ha='center', va='bottom')
+                               f'{height:,.0f}', ha='center', va='bottom')
                     
                     st.pyplot(fig)
                 
@@ -383,25 +383,25 @@ def main():
                     st.pyplot(fig)
 
             # Monthly Trends
-            st.write("###  Monthly Trends")
+            st.write("Monthly Trends")
             if 'monthly_revenue' in insights_data:
                 monthly_data = insights_data['monthly_revenue']
                 
                 fig, ax = plt.subplots(figsize=(12, 6))
                 monthly_data.plot(kind='bar', ax=ax, color='skyblue')
                 ax.set_title("Monthly Revenue Trend")
-                ax.set_ylabel("Revenue ($)")
+                ax.set_ylabel("Revenue")
                 ax.set_xlabel("Month")
                 ax.tick_params(axis='x', rotation=45)
                 
                 # Add value labels on bars
                 for i, v in enumerate(monthly_data):
-                    ax.text(i, v, f'${v:,.0f}', ha='center', va='bottom')
+                    ax.text(i, v, f'{v:,.0f}', ha='center', va='bottom')
                 
                 st.pyplot(fig)
 
             # AI-Powered Insights
-            st.write("### AI Insights")
+            st.write("AI Insights")
             
             # Generate simple insights based on data
             insights = []
@@ -413,32 +413,32 @@ def main():
                 
                 if revenue_share > 50:
                     top_cat_name = insights_data['category_stats'].index[0]
-                    insights.append(f"**Revenue Concentration**: {top_cat_name} accounts for {revenue_share:.1f}% of total revenue")
+                    insights.append(f"Revenue Concentration: {top_cat_name} accounts for {revenue_share:.1f}% of total revenue")
                 elif revenue_share < 20:
-                    insights.append(" **Diversified Revenue**: Revenue is well distributed across categories")
+                    insights.append("Diversified Revenue: Revenue is well distributed across categories")
             
             # Transaction size insight
             avg_tx = insights_data['avg_transaction']
             if avg_tx < 50:
-                insights.append(" **Small Transactions**: Average transaction size is low - consider upselling strategies")
+                insights.append("Small Transactions: Average transaction size is low - consider upselling strategies")
             elif avg_tx > 200:
-                insights.append(" **Large Transactions**: High average transaction value - focus on retention")
+                insights.append("Large Transactions: High average transaction value - focus on retention")
             
             # Growth insight
             if 'latest_growth' in insights_data:
                 growth = insights_data['latest_growth']
                 if not pd.isna(growth):
                     if growth > 10:
-                        insights.append(f" **Strong Growth**: Monthly revenue growing at {growth:.1f}%")
+                        insights.append(f"Strong Growth: Monthly revenue growing at {growth:.1f}%")
                     elif growth < 0:
-                        insights.append(f"**Declining Revenue**: Monthly revenue down by {abs(growth):.1f}%")
+                        insights.append(f"Declining Revenue: Monthly revenue down by {abs(growth):.1f}%")
             
             # Display insights
             if insights:
                 for insight in insights:
                     st.info(insight)
             else:
-                st.info(" Analyze more data to generate detailed insights")
+                st.info("Analyze more data to generate detailed insights")
                 
         else:
             st.info("No transaction data available for insights generation.")

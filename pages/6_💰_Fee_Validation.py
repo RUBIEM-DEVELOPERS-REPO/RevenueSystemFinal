@@ -1,10 +1,63 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from utils.database import get_transaction_data, get_charges_data, get_price_recommendations
+import psycopg2
 
 st.set_page_config(page_title="Fee Validation", layout="wide")
 st.title("Fee Validation & Compliance")
+
+# Database Connection Parameters
+NEON_DB_MAIN = {
+    "host": "ep-frosty-dawn-ad0cnbjn-pooler.c-2.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "user": "neondb_owner",
+    "password": "npg_XCO6HPNfw7El",
+    "port": 5432
+}
+
+NEON_DB_PRICE = {
+    "host": "ep-wispy-tooth-a4uiq32x.us-east-1.aws.neon.tech",
+    "database": "neondb",
+    "user": "neondb_owner",
+    "password": "npg_7AlUWE8wkigH",
+    "port": 5432
+}
+
+def get_transaction_data():
+    """Fetch transaction data from main Neon database"""
+    try:
+        conn = psycopg2.connect(**NEON_DB_MAIN)
+        query = "SELECT * FROM transactions ORDER BY created_at DESC LIMIT 200"
+        transactions_df = pd.read_sql(query, conn)
+        conn.close()
+        return transactions_df
+    except Exception as e:
+        st.error(f"Error connecting to transactions database: {e}")
+        return pd.DataFrame()
+
+def get_charges_data():
+    """Fetch charges data from main Neon database"""
+    try:
+        conn = psycopg2.connect(**NEON_DB_MAIN)
+        query = "SELECT * FROM charges"
+        charges_df = pd.read_sql(query, conn)
+        conn.close()
+        return charges_df
+    except Exception as e:
+        st.error(f"Error connecting to charges database: {e}")
+        return pd.DataFrame()
+
+def get_price_recommendations():
+    """Fetch price recommendations from price Neon database"""
+    try:
+        conn = psycopg2.connect(**NEON_DB_PRICE)
+        query = "SELECT * FROM price_recommendations"
+        recommendations_df = pd.read_sql(query, conn)
+        conn.close()
+        return recommendations_df
+    except Exception as e:
+        st.error(f"Error connecting to price recommendations database: {e}")
+        return pd.DataFrame()
 
 # Load data
 try:
@@ -12,7 +65,7 @@ try:
     charges_df = get_charges_data()
     recommendations_df = get_price_recommendations()
 except Exception as e:
-    st.error(f"❌ Error loading data: {e}")
+    st.error(f"Error loading data: {e}")
     transactions_df = pd.DataFrame()
     charges_df = pd.DataFrame()
     recommendations_df = pd.DataFrame()
@@ -172,7 +225,7 @@ if not transactions_df.empty:
                         st.plotly_chart(fig3, use_container_width=True)
     
     # Fee difference analysis
-    st.subheader(" Fee Difference Analysis")
+    st.subheader("Fee Difference Analysis")
     
     if 'fee_difference' in transactions_df.columns:
         col1, col2 = st.columns(2)
@@ -239,14 +292,14 @@ if not transactions_df.empty:
         for col in numeric_cols:
             if col in display_df.columns:
                 display_df[col] = pd.to_numeric(display_df[col], errors='coerce')
-                display_df[col] = display_df[col].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A")
+                display_df[col] = display_df[col].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "N/A")
         
         st.dataframe(display_df, use_container_width=True, height=400)
         
         # Download option
         csv = transactions_df[display_cols].to_csv(index=False)
         st.download_button(
-            label="📥 Download Fee Analysis as CSV",
+            label="Download Fee Analysis as CSV",
             data=csv,
             file_name="fee_validation_analysis.csv",
             mime="text/csv"
@@ -255,10 +308,10 @@ if not transactions_df.empty:
         st.warning("No columns available for display")
     
 else:
-    st.info(" No transaction data available. Please check your database connection.")
+    st.info("No transaction data available. Please check your database connection.")
 
 # Show charges and recommendations info
-with st.expander(" Fee Structure Information"):
+with st.expander("Fee Structure Information"):
     col1, col2 = st.columns(2)
     
     with col1:
