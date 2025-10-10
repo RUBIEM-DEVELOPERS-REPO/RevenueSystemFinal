@@ -1299,7 +1299,7 @@ elif st.session_state.current_tab == "anomaly":
 
 elif st.session_state.current_tab == "fee":
     with st.container():
-        st.subheader("💰 Fee Compliance Analysis")
+        st.subheader(" Fee Compliance Analysis")
         
         if st.session_state.transactions_df.empty:
             st.info("🔄 Processing transactions... Fee compliance data will appear here shortly.")
@@ -1426,13 +1426,13 @@ elif st.session_state.current_tab == "fee":
 
 elif st.session_state.current_tab == "ai":
     with st.container():
-        st.subheader("🤖 AI Insights & Recommendations")
+        st.subheader(" AI Insights & Recommendations")
         
         if st.session_state.transactions_df.empty:
-            st.info("🔄 Processing transactions... AI insights will generate as data accumulates.")
+            st.info("Processing transactions... AI insights will generate as data accumulates.")
         else:
             # Generate AI insights
-            with st.spinner("🤖 Generating AI insights..."):
+            with st.spinner(" Generating AI insights..."):
                 anomalies_df = st.session_state.transactions_df[st.session_state.transactions_df['is_anomaly'] == 1] if 'is_anomaly' in st.session_state.transactions_df.columns else pd.DataFrame()
                 insights = ai_insights_with_severity(st.session_state.transactions_df, anomalies_df)
             
@@ -1440,7 +1440,7 @@ elif st.session_state.current_tab == "ai":
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.subheader("💰 Revenue Insights")
+                    st.subheader(" Revenue Insights")
                     if 'revenue_insights' in insights:
                         for insight in insights['revenue_insights']:
                             st.write(f"• {insight}")
@@ -1448,13 +1448,13 @@ elif st.session_state.current_tab == "ai":
                         st.info("Analyzing revenue patterns...")
                 
                 with col2:
-                    st.subheader("📊 Business Impact")
+                    st.subheader(" Business Impact")
                     if 'business_impact' in insights:
                         st.info(insights['business_impact'])
                     else:
                         st.info("Assessing business impact...")
                 
-                st.subheader("🚨 Critical Anomalies & Actions")
+                st.subheader(" Critical Anomalies & Actions")
                 if 'critical_anomalies' in insights and insights['critical_anomalies']:
                     for i, anomaly in enumerate(insights['critical_anomalies']):
                         severity_color = "🔴" if anomaly.get('severity') == 'high' else "🟡" if anomaly.get('severity') == 'medium' else "🟢"
@@ -1466,7 +1466,7 @@ elif st.session_state.current_tab == "ai":
                     st.success("✅ No critical anomalies requiring immediate action")
                 
                 # Real-time AI monitoring
-                st.subheader("📈 Real-time Monitoring")
+                st.subheader(" Real-time Monitoring")
                 if not st.session_state.transactions_df.empty:
                     col1, col2, col3 = st.columns(3)
                     
@@ -1492,10 +1492,10 @@ elif st.session_state.current_tab == "ai":
 
 elif st.session_state.current_tab == "differences":
     with st.container():
-        st.subheader("📊 Fee Differences Analysis")
+        st.subheader(" Fee Differences Analysis")
         
         if st.session_state.transactions_df.empty:
-            st.info("🔄 Processing transactions... Fee differences will appear here shortly.")
+            st.info("Processing transactions... Fee differences will appear here shortly.")
         elif 'fee_applied' in st.session_state.transactions_df.columns:
             # Create fee differences table
             fee_diff_df = st.session_state.transactions_df[['id', 'amount', 'fee_applied', 'transaction_type_name']].copy()
@@ -1576,7 +1576,7 @@ elif st.session_state.current_tab == "differences":
                     st.plotly_chart(fig_box, use_container_width=True)
             
             # Display summary metrics
-            st.subheader("💰 Fee Difference Summary")
+            st.subheader("Fee Difference Summary")
             
             col1, col2, col3, col4 = st.columns(4)
             with col1:
@@ -1737,7 +1737,7 @@ elif st.session_state.current_tab == "types":
                         st.metric("Total Anomalies", "N/A")
             
             # Display transaction types table with safe data handling
-            st.subheader("📋 Transaction Types Data")
+            st.subheader(" Transaction Types Data")
             
             # Create a safe copy for display
             display_types = st.session_state.transaction_types.copy()
@@ -1755,7 +1755,7 @@ elif st.session_state.current_tab == "types":
 
 elif st.session_state.current_tab == "simulator":
     with st.container():
-        st.subheader("🎯 Scenario Simulator")
+        st.subheader(" Scenario Simulator")
         
         st.info("""
         **Test different business scenarios to understand their impact on your revenue and compliance:**
@@ -1798,7 +1798,7 @@ elif st.session_state.current_tab == "simulator":
         
         with col2:
             # Simulation results preview
-            st.subheader("📊 Expected Impact")
+            st.subheader(" Expected Impact")
             
             if simulation_type == "Fee Structure Change":
                 if not st.session_state.transactions_df.empty and 'fee_applied' in st.session_state.transactions_df.columns:
@@ -1856,13 +1856,13 @@ elif st.session_state.current_tab == "simulator":
                 st.metric("Expected Impact", strictness_impact.get(rule_strictness, "Unknown"))
         
         # Action buttons
-        st.subheader("🚀 Run Simulation")
+        st.subheader(" Run Simulation")
         
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            if st.button("▶️ Run Simulation", type="primary", use_container_width=True):
-                st.success(f"🏃‍♂️ Running {simulation_type} simulation...")
+            if st.button(" Run Simulation", type="primary", use_container_width=True):
+                st.success(f" Running {simulation_type} simulation...")
                 
                 # Simulate processing delay
                 import time
@@ -1895,17 +1895,17 @@ elif st.session_state.current_tab == "simulator":
                     """)
         
         with col2:
-            if st.button("📊 Export Results", use_container_width=True):
-                st.info("📄 Simulation report would be generated and downloaded here")
+            if st.button(" Export Results", use_container_width=True):
+                st.info("Simulation report would be generated and downloaded here")
                 # In a real implementation, this would generate a PDF/Excel report
                 
         with col3:
-            if st.button("🔄 Reset Scenario", use_container_width=True):
-                st.info("🔄 Scenario parameters reset to default values")
+            if st.button(" Reset Scenario", use_container_width=True):
+                st.info(" Scenario parameters reset to default values")
                 st.rerun()
         
         # Simulation explanation
-        with st.expander("ℹ️ How This Simulation Works"):
+        with st.expander("ℹHow This Simulation Works"):
             st.write("""
             **Scenario Simulation Engine:**
             - **Fee Structure Changes**: Models revenue impact of different fee percentages using current transaction patterns
